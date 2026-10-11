@@ -18,6 +18,7 @@ object ResetManager {
         cm.setMode(SmartConfigMode.DEFAULT_ONLY)
         cm.setActiveName("")
         SmartLearnedStore.clear()
+        com.example.autoclicker.engine.FastPipeline.FingerprintStore(context).clearAll()
         EventLogManager.log(EventLogManager.TAG_AUTO_CLICKER, "RESET: умный режим сброшен (встроенный конфиг)")
     }
 
@@ -36,6 +37,7 @@ object ResetManager {
         cm.setMode(SmartConfigMode.DEFAULT_ONLY)
         cm.setActiveName("")
         SmartLearnedStore.clear()
+        com.example.autoclicker.engine.FastPipeline.FingerprintStore(context).clearAll()
         EventLogManager.log(EventLogManager.TAG_AUTO_CLICKER, "RESET: сброшены все настройки")
     }
 

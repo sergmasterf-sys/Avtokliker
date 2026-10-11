@@ -186,6 +186,7 @@ class SmartEngine private constructor(
     private val wideSearchTick = java.util.concurrent.ConcurrentHashMap<String, Int>()
     private val variantBuildCache = SimpleLruCache<String, TemplateVariant>(40)
     private var lastYellowRejectLogMs = 0L
+    private var lastBlueRejectLogMs = 0L
 
 
     private fun callerInfo(): String {
@@ -342,20 +343,25 @@ class SmartEngine private constructor(
                 val effectiveConfig = configManager.buildEffectiveRules()
 
                 val (realW, realH) = getRealScreenSize()
-                val H = minOf(realW, realH).toFloat()
-                val prepStart = System.currentTimeMillis()
-                val prepped = ensureRuleTemplates(effectiveConfig.rules, realW, realH)
-                val multis = floatArrayOf(0.55f, 0.65f, 0.75f, 0.85f, 0.93f, 1.0f, 1.07f, 1.15f, 1.30f, 1.45f, 1.65f, 1.85f, 2.10f)
-                for (rt in prepped) {
-                    for (m in multis) {
-                        getOrBuildVariant(rt, m, H)
+                val isDefaultOnly = effectiveConfig.mode == com.example.autoclicker.data.SmartConfigMode.DEFAULT_ONLY ||
+                    (effectiveConfig.builtinCount == effectiveConfig.rules.size && effectiveConfig.customCount == 0)
+
+                if (!isDefaultOnly) {
+                    val H = minOf(realW, realH).toFloat()
+                    val prepStart = System.currentTimeMillis()
+                    val prepped = ensureRuleTemplates(effectiveConfig.rules, realW, realH)
+                    val multis = floatArrayOf(0.55f, 0.65f, 0.75f, 0.85f, 0.93f, 1.0f, 1.07f, 1.15f, 1.30f, 1.45f, 1.65f, 1.85f, 2.10f)
+                    for (rt in prepped) {
+                        for (m in multis) {
+                            getOrBuildVariant(rt, m, H)
+                        }
                     }
+                    val prepMs = System.currentTimeMillis() - prepStart
+                    EventLogManager.log(
+                        EventLogManager.TAG_AUTO_CLICKER,
+                        "SMART: шаблоны подготовлены заранее за ${prepMs}мс (вариантов масштаба: ${multis.size})"
+                    )
                 }
-                val prepMs = System.currentTimeMillis() - prepStart
-                EventLogManager.log(
-                    EventLogManager.TAG_AUTO_CLICKER,
-                    "SMART: шаблоны подготовлены заранее за ${prepMs}мс (вариантов масштаба: ${multis.size})"
-                )
 
                 EventLogManager.log(
                     EventLogManager.TAG_AUTO_CLICKER,
@@ -373,7 +379,38 @@ class SmartEngine private constructor(
                 val newJob = launch {
                     val currentJob = coroutineContext[Job]
                     try {
-                        runLoop(effectiveConfig)
+                        if (isDefaultOnly) {
+                            val service = AccessibilityServiceHolder.service.value
+                            if (service != null) {
+                                val pipeline = FastPipeline(
+                                    context = context,
+                                    gestureExecutor = gestureExecutor,
+                                    settingsRepository = settingsRepository,
+                                    onActionUpdate = { curr, next, last ->
+                                        _currentAction.value = curr
+                                        _nextAction.value = next
+                                        if (last != null) _lastAction.value = last
+                                    },
+                                    onCycleIncrement = {
+                                        _cycleNumber.value = _cycleNumber.value + 1
+                                    },
+                                    templateFallback = { bmp, rule ->
+                                        val rt = ensureRuleTemplates(listOf(rule), realW, realH).firstOrNull()
+                                        if (rt != null) {
+                                            val eval = evalBuiltinMatch(bmp, rt)
+                                            if (eval.bestScore >= rule.threshold) {
+                                                Pair(eval.clickX, eval.clickY)
+                                            } else null
+                                        } else null
+                                    }
+                                )
+                                pipeline.runLoop(service, realW, realH, effectiveConfig)
+                            } else {
+                                runLoop(effectiveConfig)
+                            }
+                        } else {
+                            runLoop(effectiveConfig)
+                        }
                     } catch (e: CancellationException) {
                         throw e
                     } catch (t: Throwable) {
@@ -1655,79 +1692,26 @@ class SmartEngine private constructor(
         val pixels = IntArray(roiW * roiH)
         screenshot.getPixels(pixels, 0, roiW, x0, y0, roiW, roiH)
 
-        var minX = roiW
-        var maxX = 0
-        var minY = roiH
-        var maxY = 0
-        var yellowCount = 0
-
-        val step = 2
-        for (y in 0 until roiH step step) {
-            val rowOffset = y * roiW
-            for (x in 0 until roiW step step) {
-                val p = pixels[rowOffset + x]
-                val r = (p shr 16) and 0xFF
-                val g = (p shr 8) and 0xFF
-                val b = p and 0xFF
-                // Золотисто-желтый оттенок PUBG Mobile
-                if (r in 180..255 && g in 130..245 && b in 0..115 && (r - b) >= 85 && (g - b) >= 45 && r >= (g - 20)) {
-                    yellowCount++
-                    if (x < minX) minX = x
-                    if (x > maxX) maxX = x
-                    if (y < minY) minY = y
-                    if (y > maxY) maxY = y
-                }
-            }
+        val result = ColorBlobFinder.findYellowButton(pixels, roiW, roiH, step = 2, screenW = sW, screenH = sH)
+        if (result.best != null) {
+            val clickX = x0 + result.best.centerX
+            val clickY = y0 + result.best.centerY
+            val score = (0.86f + (result.best.density * 0.10f)).coerceAtMost(0.98f)
+            return FoundMatch(name, clickX, clickY, score, isContinue, afterDelayMs = 50L, source = "цвет")
         }
 
-        if (yellowCount < 15) return null
-
-        val boxW = maxX - minX + 1
-        val boxH = maxY - minY + 1
-
-        val minAllowedW = (sW * 0.06f).toInt()
-        val maxAllowedW = (sW * 0.40f).toInt()
-        val minAllowedH = (sH * 0.03f).toInt()
-        val maxAllowedH = (sH * 0.22f).toInt()
-
-        if (boxW in minAllowedW..maxAllowedW && boxH in minAllowedH..maxAllowedH) {
-            val aspect = boxW.toFloat() / boxH
-            if (aspect in 1.4f..6.5f) {
-                val totalSampled = ((boxW / step) * (boxH / step)).coerceAtLeast(1)
-                val density = yellowCount.toFloat() / totalSampled
-                if (density >= 0.25f) {
-                    val clickX = x0 + (minX + maxX) / 2f
-                    val clickY = y0 + (minY + maxY) / 2f
-                    val score = (0.86f + (density * 0.10f)).coerceAtMost(0.98f)
-                    return FoundMatch(name, clickX, clickY, score, isContinue, afterDelayMs = 50L, source = "цвет")
-                } else {
-                    val nowR = System.currentTimeMillis()
-                    if (nowR - lastYellowRejectLogMs >= 5000L) {
-                        lastYellowRejectLogMs = nowR
-                        EventLogManager.log(
-                            EventLogManager.TAG_AUTO_CLICKER,
-                            "SMART: жёлтая область отклонена: рамка ${boxW}x${boxH} (допустимо ширина $minAllowedW..$maxAllowedW, высота $minAllowedH..$maxAllowedH), пропорция ${"%.2f".format(aspect)}, плотность ${"%.2f".format(density)} (нужно ≥ 0.25)"
-                        )
-                    }
-                }
-            } else {
-                val nowR = System.currentTimeMillis()
-                if (nowR - lastYellowRejectLogMs >= 5000L) {
-                    lastYellowRejectLogMs = nowR
-                    val aspect = boxW.toFloat() / boxH.coerceAtLeast(1)
-                    EventLogManager.log(
-                        EventLogManager.TAG_AUTO_CLICKER,
-                        "SMART: жёлтая область отклонена: рамка ${boxW}x${boxH} (допустимо ширина $minAllowedW..$maxAllowedW, высота $minAllowedH..$maxAllowedH), пропорция ${"%.2f".format(aspect)}, плотность n/a (нужно ≥ 0.25)"
-                    )
-                }
-            }
-        } else {
+        val bestRejected = result.bestRejected
+        if (bestRejected != null && bestRejected.effectivePixels >= 10) {
             val nowR = System.currentTimeMillis()
             if (nowR - lastYellowRejectLogMs >= 5000L) {
                 lastYellowRejectLogMs = nowR
+                val minAllowedW = (sW * 0.06f).toInt()
+                val maxAllowedW = (sW * 0.40f).toInt()
+                val minAllowedH = (sH * 0.03f).toInt()
+                val maxAllowedH = (sH * 0.22f).toInt()
                 EventLogManager.log(
                     EventLogManager.TAG_AUTO_CLICKER,
-                    "SMART: жёлтая область отклонена: рамка ${boxW}x${boxH} (допустимо ширина $minAllowedW..$maxAllowedW, высота $minAllowedH..$maxAllowedH), пропорция n/a, плотность n/a (нужно ≥ 0.25)"
+                    "SMART: жёлтая область отклонена: рамка ${bestRejected.width}x${bestRejected.height} (допустимо ширина $minAllowedW..$maxAllowedW, высота $minAllowedH..$maxAllowedH), пропорция ${"%.2f".format(bestRejected.aspect)}, плотность ${"%.2f".format(bestRejected.density)} (нужно ≥ 0.45)"
                 )
             }
         }
@@ -1759,52 +1743,27 @@ class SmartEngine private constructor(
         val pixels = IntArray(roiW * roiH)
         screenshot.getPixels(pixels, 0, roiW, x0, y0, roiW, roiH)
 
-        var minX = roiW
-        var maxX = 0
-        var minY = roiH
-        var maxY = 0
-        var blueCount = 0
-
-        val step = 2
-        for (y in 0 until roiH step step) {
-            val rowOffset = y * roiW
-            for (x in 0 until roiW step step) {
-                val p = pixels[rowOffset + x]
-                val r = (p shr 16) and 0xFF
-                val g = (p shr 8) and 0xFF
-                val b = p and 0xFF
-                // Синий оттенок кнопки продолжения PUBG
-                if (b in 150..255 && r in 0..120 && g in 80..230 && (b - r) >= 60) {
-                    blueCount++
-                    if (x < minX) minX = x
-                    if (x > maxX) maxX = x
-                    if (y < minY) minY = y
-                    if (y > maxY) maxY = y
-                }
-            }
+        val result = ColorBlobFinder.findBlueButton(pixels, roiW, roiH, step = 2, screenW = sW, screenH = sH)
+        if (result.best != null) {
+            val clickX = x0 + result.best.centerX
+            val clickY = y0 + result.best.centerY
+            val score = (0.84f + (result.best.density * 0.10f)).coerceAtMost(0.96f)
+            return FoundMatch(name, clickX, clickY, score, isContinue, afterDelayMs = 50L, source = "цвет")
         }
 
-        if (blueCount < 15) return null
-
-        val boxW = maxX - minX + 1
-        val boxH = maxY - minY + 1
-
-        val minAllowedW = (sW * 0.05f).toInt()
-        val maxAllowedW = (sW * 0.35f).toInt()
-        val minAllowedH = (sH * 0.03f).toInt()
-        val maxAllowedH = (sH * 0.20f).toInt()
-
-        if (boxW in minAllowedW..maxAllowedW && boxH in minAllowedH..maxAllowedH) {
-            val aspect = boxW.toFloat() / boxH
-            if (aspect in 1.4f..6.0f) {
-                val totalSampled = ((boxW / step) * (boxH / step)).coerceAtLeast(1)
-                val density = blueCount.toFloat() / totalSampled
-                if (density >= 0.25f) {
-                    val clickX = x0 + (minX + maxX) / 2f
-                    val clickY = y0 + (minY + maxY) / 2f
-                    val score = (0.84f + (density * 0.10f)).coerceAtMost(0.96f)
-                    return FoundMatch(name, clickX, clickY, score, isContinue, afterDelayMs = 50L, source = "цвет")
-                }
+        val bestRejected = result.bestRejected
+        if (bestRejected != null && bestRejected.effectivePixels >= 10) {
+            val nowR = System.currentTimeMillis()
+            if (nowR - lastBlueRejectLogMs >= 5000L) {
+                lastBlueRejectLogMs = nowR
+                val minAllowedW = (sW * 0.05f).toInt()
+                val maxAllowedW = (sW * 0.35f).toInt()
+                val minAllowedH = (sH * 0.03f).toInt()
+                val maxAllowedH = (sH * 0.20f).toInt()
+                EventLogManager.log(
+                    EventLogManager.TAG_AUTO_CLICKER,
+                    "SMART: синяя область отклонена: рамка ${bestRejected.width}x${bestRejected.height} (допустимо ширина $minAllowedW..$maxAllowedW, высота $minAllowedH..$maxAllowedH), пропорция ${"%.2f".format(bestRejected.aspect)}, плотность ${"%.2f".format(bestRejected.density)} (нужно ≥ 0.45)"
+                )
             }
         }
         return null

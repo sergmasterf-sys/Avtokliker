@@ -51,7 +51,7 @@ class GestureExecutor {
                         moveTo(x, y)
                         lineTo(x, y + 1f)
                     }
-                    val strokeDuration = duration.coerceIn(40L, 200L)
+                    val strokeDuration = duration.coerceIn(30L, 200L)
                     val stroke = GestureDescription.StrokeDescription(path, 0L, strokeDuration)
                     val gesture = GestureDescription.Builder()
                         .addStroke(stroke)
