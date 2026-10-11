@@ -30,6 +30,12 @@ class FastPipeline(
     private val templateFallback: (suspend (Bitmap, SmartRule) -> Pair<Float, Float>?)? = null
 ) {
 
+    companion object {
+        // Порядок долей экрана: [x0, x1, y0, y1]
+        val START_ROI = floatArrayOf(0.0f, 0.42f, 0.65f, 1.0f)
+        val CONTINUE_ROI = floatArrayOf(0.72f, 1.0f, 0.84f, 1.0f)
+    }
+
     enum class State {
         UNKNOWN,
         LOBBY,
@@ -219,6 +225,7 @@ class FastPipeline(
     // Логирование и статистика (без спама, раз в 5 сек)
     private var lastSummaryLogMs = 0L
     private var lastCalibRejectLogMs = 0L
+    private var lastSmallRoiLogMs = 0L
     private var shotTimeSum = 0L
     private var procTimeSum = 0L
     private var framesCount = 0
@@ -231,7 +238,10 @@ class FastPipeline(
                 State.UNKNOWN -> onActionUpdate("Определение экрана...", "Поиск кнопок", null)
                 State.LOBBY -> onActionUpdate("В лобби: ожидание старта", "Поиск кнопки НАЧАТЬ", null)
                 State.IN_MATCH -> onActionUpdate("Матч идёт: пауза кликов", "Ожидание окончания матча", null)
-                State.RESULT -> onActionUpdate("Результаты матча", "Нажатие ПРОДОЛЖИТЬ", null)
+                State.RESULT -> {
+                    lastResultActionMs = System.currentTimeMillis()
+                    onActionUpdate("Результаты матча", "Нажатие ПРОДОЛЖИТЬ", null)
+                }
             }
         }
     }
@@ -389,7 +399,7 @@ class FastPipeline(
 
         // Отпечатков нет или не совпали — калибровка
         if (startFp == null) {
-            val calibStart = calibrateColor(bitmap, sW, sH, "start", floatArrayOf(0.0f, 0.42f, 0.65f, 1.0f), ButtonKind.YELLOW)
+            val calibStart = calibrateColor(bitmap, sW, sH, "start", START_ROI, ButtonKind.YELLOW)
             if (calibStart != null) {
                 fingerprintStore.saveStart(calibStart)
                 transitionTo(State.LOBBY)
@@ -398,8 +408,8 @@ class FastPipeline(
         }
 
         if (continueFps.isEmpty()) {
-            val calibCont = calibrateColor(bitmap, sW, sH, "continue", floatArrayOf(0.50f, 0.65f, 1.0f, 1.0f), ButtonKind.BLUE)
-                ?: calibrateColor(bitmap, sW, sH, "continue", floatArrayOf(0.50f, 0.65f, 1.0f, 1.0f), ButtonKind.YELLOW)
+            val calibCont = calibrateColor(bitmap, sW, sH, "continue", CONTINUE_ROI, ButtonKind.BLUE)
+                ?: calibrateColor(bitmap, sW, sH, "continue", CONTINUE_ROI, ButtonKind.YELLOW)
             if (calibCont != null) {
                 fingerprintStore.saveContinue(calibCont)
                 transitionTo(State.RESULT)
@@ -439,7 +449,7 @@ class FastPipeline(
                 lobbyStartMissCount++
                 if (lobbyStartMissCount >= 5) {
                     // Защита: отпечаток start не совпал 5 раз подряд — проверить, не сместилась ли кнопка
-                    val colorBlob = searchColorBlob(bitmap, sW, sH, floatArrayOf(0.0f, 0.42f, 0.65f, 1.0f), ButtonKind.YELLOW)
+                    val colorBlob = searchColorBlob(bitmap, sW, sH, START_ROI, ButtonKind.YELLOW)
                     if (colorBlob != null) {
                         val oldX = startFp.xFrac * sW
                         val oldY = startFp.yFrac * sH
@@ -459,7 +469,7 @@ class FastPipeline(
             }
         } else {
             // Отпечатка start нет — калибровка на каждом кадре
-            val calib = calibrateColor(bitmap, sW, sH, "start", floatArrayOf(0.0f, 0.42f, 0.65f, 1.0f), ButtonKind.YELLOW)
+            val calib = calibrateColor(bitmap, sW, sH, "start", START_ROI, ButtonKind.YELLOW)
             if (calib != null) {
                 fingerprintStore.saveStart(calib)
                 val tapX = calib.xFrac * sW
@@ -522,8 +532,8 @@ class FastPipeline(
 
         // Если continue ещё не изучен — калибровка в ROI continue
         if (continueFps.isEmpty()) {
-            val calibCont = calibrateColor(bitmap, sW, sH, "continue_blue", floatArrayOf(0.50f, 0.65f, 1.0f, 1.0f), ButtonKind.BLUE)
-                ?: calibrateColor(bitmap, sW, sH, "continue_mvp", floatArrayOf(0.50f, 0.65f, 1.0f, 1.0f), ButtonKind.YELLOW)
+            val calibCont = calibrateColor(bitmap, sW, sH, "continue_blue", CONTINUE_ROI, ButtonKind.BLUE)
+                ?: calibrateColor(bitmap, sW, sH, "continue_mvp", CONTINUE_ROI, ButtonKind.YELLOW)
             if (calibCont != null) {
                 fingerprintStore.saveContinue(calibCont)
                 val tapX = calibCont.xFrac * sW
@@ -574,8 +584,8 @@ class FastPipeline(
         if (continueClicked) return
 
         // Проверяем, появилась ли новая кнопка continue другого цвета/позиции
-        val newCalib = calibrateColor(bitmap, sW, sH, "continue_blue", floatArrayOf(0.50f, 0.65f, 1.0f, 1.0f), ButtonKind.BLUE)
-            ?: calibrateColor(bitmap, sW, sH, "continue_mvp", floatArrayOf(0.50f, 0.65f, 1.0f, 1.0f), ButtonKind.YELLOW)
+        val newCalib = calibrateColor(bitmap, sW, sH, "continue_blue", CONTINUE_ROI, ButtonKind.BLUE)
+            ?: calibrateColor(bitmap, sW, sH, "continue_mvp", CONTINUE_ROI, ButtonKind.YELLOW)
         if (newCalib != null) {
             fingerprintStore.saveContinue(newCalib)
             val tapX = newCalib.xFrac * sW
@@ -666,7 +676,17 @@ class FastPipeline(
         val y1 = (sH * region[3]).toInt().coerceIn(y0 + 1, sH)
         val roiW = x1 - x0
         val roiH = y1 - y0
-        if (roiW < 10 || roiH < 10) return null
+        if (roiW < 10 || roiH < 10) {
+            val now = System.currentTimeMillis()
+            if (now - lastSmallRoiLogMs >= 5000L) {
+                lastSmallRoiLogMs = now
+                EventLogManager.log(
+                    EventLogManager.TAG_AUTO_CLICKER,
+                    "FAST: ROI слишком мал: ${roiW}x${roiH} (region=${region.contentToString()})"
+                )
+            }
+            return null
+        }
 
         val requiredSize = roiW * roiH
         if (roiPixelsBuffer.size < requiredSize) {
