@@ -59,7 +59,7 @@ data class SmartRule(
     val tapTarget: String = "found",  // "found" или "fixed"
     val tapX: Float? = null,
     val tapY: Float? = null,
-    val afterDelayMs: Long = 1000L,
+    val afterDelayMs: Long = 400L,
     val refHeight: Int = 800,
     val builtin: Boolean = false,
     val configDir: File? = null,
@@ -162,7 +162,7 @@ data class SmartConfig(
     val version: Int,
     val refWidth: Int,
     val refHeight: Int,
-    val scanIntervalMs: Long = 1000L,
+    val scanIntervalMs: Long = 300L,
     val idleTimeoutMin: Int = 5,
     val rules: List<SmartRule>
 ) {
@@ -179,7 +179,7 @@ data class SmartConfig(
                     region = floatArrayOf(0.50f, 0.65f, 1.0f, 1.0f),
                     threshold = 0.75f,
                     tapTarget = "found",
-                    afterDelayMs = 1000L,
+                    afterDelayMs = 400L,
                     refHeight = 800,
                     refWidth = 1340,
                     builtin = true
@@ -191,7 +191,7 @@ data class SmartConfig(
                     region = floatArrayOf(0.50f, 0.65f, 1.0f, 1.0f),
                     threshold = 0.75f,
                     tapTarget = "found",
-                    afterDelayMs = 1000L,
+                    afterDelayMs = 400L,
                     refHeight = 800,
                     refWidth = 1340,
                     builtin = true
@@ -203,7 +203,7 @@ data class SmartConfig(
                     region = floatArrayOf(0.0f, 0.42f, 0.65f, 1.0f),
                     threshold = 0.75f,
                     tapTarget = "found",
-                    afterDelayMs = 1000L,
+                    afterDelayMs = 400L,
                     refHeight = 800,
                     refWidth = 1340,
                     builtin = true
@@ -215,7 +215,7 @@ data class SmartConfig(
                 version = 1,
                 refWidth = 1340,
                 refHeight = 800,
-                scanIntervalMs = 1000L,
+                scanIntervalMs = 300L,
                 idleTimeoutMin = 5,
                 rules = rules
             )
@@ -288,7 +288,7 @@ data class SmartConfig(
             val version = json.optInt("version", 1)
             val refWidth = json.optInt("refWidth", 1340).coerceAtLeast(100)
             val refHeight = json.optInt("refHeight", 800).coerceAtLeast(100)
-            val scanIntervalMs = json.optLong("scanIntervalMs", 1000L).coerceIn(500L, 10000L)
+            val scanIntervalMs = json.optLong("scanIntervalMs", 300L).coerceIn(200L, 10000L)
             val idleTimeoutMin = json.optInt("idleTimeoutMin", 5).coerceIn(1, 60)
 
             val rulesArr = json.optJSONArray("rules")
@@ -412,7 +412,7 @@ data class SmartConfig(
                     throw IllegalArgumentException("Правило '$id': отсутствует блок 'tap'")
                 }
 
-                val afterDelayMs = rObj.optLong("afterDelayMs", 1000L).coerceAtLeast(50L)
+                val afterDelayMs = rObj.optLong("afterDelayMs", 500L).coerceAtLeast(50L)
                 val primaryImg = parsedImages.firstOrNull()
 
                 rulesList.add(

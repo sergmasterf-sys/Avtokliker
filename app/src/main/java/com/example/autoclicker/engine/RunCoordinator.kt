@@ -68,16 +68,37 @@ object RunCoordinator {
         settingsRepo.setPaused(false)
 
         val s = settingsRepo.getLatestSettings()
-        if (AccessibilityStatus.isEnabledInSystem(app) && !AccessibilityServiceHolder.isConnected) {
-            var waited = 0
-            while (!AccessibilityServiceHolder.isConnected && waited < 3000) {
-                try {
-                    Thread.sleep(200)
-                } catch (_: InterruptedException) {
-                    break
+
+        // Проверка оптимизации батареи раз в сутки (B.8)
+        try {
+            val pm = app.getSystemService(Context.POWER_SERVICE) as? PowerManager
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M && pm != null) {
+                val isIgnoring = pm.isIgnoringBatteryOptimizations(app.packageName)
+                EventLogManager.log(
+                    EventLogManager.TAG_AUTO_CLICKER,
+                    "BATTERY: оптимизация батареи отключена: $isIgnoring"
+                )
+                if (!isIgnoring) {
+                    val prefs = app.getSharedPreferences("app_battery_hint", Context.MODE_PRIVATE)
+                    val lastHint = prefs.getLong("last_battery_hint_time", 0L)
+                    val now = System.currentTimeMillis()
+                    if (now - lastHint > 24 * 60 * 60 * 1000L) {
+                        prefs.edit().putLong("last_battery_hint_time", now).apply()
+                        Handler(Looper.getMainLooper()).post {
+                            Toast.makeText(
+                                app,
+                                "Совет: для стабильной работы отключите оптимизацию батареи для AutoClicker",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
                 }
-                waited += 200
             }
+        } catch (t: Throwable) {
+            EventLogManager.log(
+                EventLogManager.TAG_AUTO_CLICKER,
+                "BATTERY: ошибка проверки оптимизации: ${t.message}"
+            )
         }
         val started = mutableListOf<String>()
         val problems = mutableListOf<String>()

@@ -51,8 +51,48 @@ class PreparedCustomRule(
 
 object CustomRuleSearch {
 
+    class SimpleLruMap<K, V>(
+        private val maxSize: Int,
+        private val onEvict: ((K, V) -> Unit)? = null
+    ) {
+        private val map = object : LinkedHashMap<K, V>(maxSize, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<K, V>?): Boolean {
+                val should = size > maxSize
+                if (should && eldest != null) {
+                    onEvict?.invoke(eldest.key, eldest.value)
+                }
+                return should
+            }
+        }
+
+        @Synchronized
+        operator fun get(key: K): V? = map[key]
+
+        @Synchronized
+        fun put(key: K, value: V): V? = map.put(key, value)
+
+        @Synchronized
+        operator fun set(key: K, value: V) { map.put(key, value) }
+
+        @Synchronized
+        fun containsKey(key: K): Boolean = map.containsKey(key)
+
+        @Synchronized
+        fun clear() {
+            if (onEvict != null) {
+                for ((k, v) in map) {
+                    onEvict.invoke(k, v)
+                }
+            }
+            map.clear()
+        }
+
+        @Synchronized
+        fun size(): Int = map.size
+    }
+
     private val cacheLock = Any()
-    private val variantsCache = ConcurrentHashMap<String, CustomTemplateVariant?>()
+    private val variantsCache = SimpleLruMap<String, CustomTemplateVariant?>(40)
     private val loggedSmallTemplates = Collections.synchronizedSet(mutableSetOf<String>())
     private var cachedPreparedRules: List<PreparedCustomRule>? = null
     private var cachedRulesKey: String = ""
@@ -69,6 +109,14 @@ object CustomRuleSearch {
         }
         cachedPreparedRules = null
         cachedRulesKey = ""
+    }
+
+    /**
+     * Очистка только вычисленных кэшей шаблонов (без освобождения используемых bitmap).
+     */
+    fun clearTemplateCaches() = synchronized(cacheLock) {
+        variantsCache.clear()
+        loggedSmallTemplates.clear()
     }
 
     /**
@@ -313,7 +361,10 @@ object CustomRuleSearch {
         factor: Int
     ): CustomTemplateVariant? = synchronized(cacheLock) {
         val key = "${ruleId}_${imageIndex}_${String.format(Locale.US, "%.4f", scale)}_$factor"
-        return variantsCache.computeIfAbsent(key) {
+        if (variantsCache.containsKey(key)) {
+            return variantsCache[key]
+        }
+        val computed = run {
             val w = (bmp.width * scale).roundToInt()
             val h = (bmp.height * scale).roundToInt()
             if (minOf(w, h) < 12) {
@@ -324,7 +375,7 @@ object CustomRuleSearch {
                         "SMART: предупреждение: шаблон $ruleId слишком мал при масштабе ${String.format(Locale.US, "%.2f", scale)}, масштаб пропущен"
                     )
                 }
-                return@computeIfAbsent null
+                return@run null
             }
 
             val downW = (w / factor).coerceAtLeast(2)
@@ -333,7 +384,7 @@ object CustomRuleSearch {
             val scaledBmp = try {
                 Bitmap.createScaledBitmap(bmp, downW, downH, true)
             } catch (t: Throwable) {
-                return@computeIfAbsent null
+                return@run null
             }
 
             val pixels = IntArray(downW * downH)
@@ -374,6 +425,8 @@ object CustomRuleSearch {
                 sigmaT = sigmaT
             )
         }
+        variantsCache[key] = computed
+        return computed
     }
 
     /**

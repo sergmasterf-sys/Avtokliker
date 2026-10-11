@@ -55,6 +55,9 @@ class BlackHoleBadgeView @JvmOverloads constructor(
         }
     }
 
+    private var fallbackView: View? = null
+    private var lastCrashTime = 0L
+
     init {
         setBackgroundColor(Color.TRANSPARENT)
         clipChildren = false
@@ -68,10 +71,70 @@ class BlackHoleBadgeView @JvmOverloads constructor(
             webView = wv
             addView(wv, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
         } else {
-            addView(
-                FallbackHoleView(context),
-                LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
-            )
+            showFallback()
+        }
+    }
+
+    private fun showFallback() {
+        if (fallbackView == null) {
+            val fb = FallbackHoleView(context)
+            fallbackView = fb
+            addView(fb, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
+        }
+        fallbackView?.visibility = View.VISIBLE
+    }
+
+    private fun scheduleRecreation() {
+        val now = System.currentTimeMillis()
+        if (now - lastCrashTime >= 30_000L) {
+            lastCrashTime = now
+            postDelayed({
+                try {
+                    val wv = createWebView()
+                    webView = wv
+                    fallbackView?.visibility = View.GONE
+                    addView(wv, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
+                    com.example.autoclicker.data.EventLogManager.log(
+                        com.example.autoclicker.data.EventLogManager.TAG_OVERLAY,
+                        "WEBVIEW: BlackHoleBadgeView успешно пересоздан"
+                    )
+                } catch (t: Throwable) {
+                    com.example.autoclicker.data.EventLogManager.log(
+                        com.example.autoclicker.data.EventLogManager.TAG_OVERLAY,
+                        "WEBVIEW: Не удалось пересоздать BlackHoleBadgeView: ${t.message}",
+                        isError = true
+                    )
+                }
+            }, 30_000L)
+        }
+    }
+
+    fun pauseAnimation() {
+        post {
+            try {
+                webView?.onPause()
+                webView?.pauseTimers()
+                webView?.evaluateJavascript("window.pause && window.pause();", null)
+            } catch (_: Throwable) {}
+        }
+    }
+
+    fun resumeAnimation() {
+        post {
+            try {
+                webView?.onResume()
+                webView?.resumeTimers()
+                webView?.evaluateJavascript("window.resume && window.resume();", null)
+            } catch (_: Throwable) {}
+        }
+    }
+
+    override fun onVisibilityChanged(changedView: View, visibility: Int) {
+        super.onVisibilityChanged(changedView, visibility)
+        if (visibility == View.VISIBLE) {
+            resumeAnimation()
+        } else {
+            pauseAnimation()
         }
     }
 
@@ -87,6 +150,7 @@ class BlackHoleBadgeView @JvmOverloads constructor(
     private fun createWebView(): WebView {
         return WebView(context).apply {
             setBackgroundColor(Color.TRANSPARENT)
+            setLayerType(LAYER_TYPE_HARDWARE, null)
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.cacheMode = WebSettings.LOAD_DEFAULT
@@ -108,6 +172,24 @@ class BlackHoleBadgeView @JvmOverloads constructor(
             webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView?, url: String?) {
                     pushRing()
+                }
+
+                override fun onRenderProcessGone(view: WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
+                    com.example.autoclicker.data.EventLogManager.log(
+                        com.example.autoclicker.data.EventLogManager.TAG_OVERLAY,
+                        "WEBVIEW: Render process gone in BlackHoleBadgeView (didCrash=${detail?.didCrash()})",
+                        isError = true
+                    )
+                    try {
+                        view?.let {
+                            (it.parent as? ViewGroup)?.removeView(it)
+                            it.destroy()
+                        }
+                    } catch (_: Throwable) {}
+                    webView = null
+                    showFallback()
+                    scheduleRecreation()
+                    return true
                 }
             }
             loadUrl("file:///android_asset/black_hole_button.html?mode=badge")

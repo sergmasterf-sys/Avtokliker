@@ -43,8 +43,8 @@ class GestureExecutor {
             return false
         }
 
-        // Ограничиваем ожидание завершения жеста таймаутом в 2000 мс
-        val result = withTimeoutOrNull(2000L) {
+        // Ограничиваем ожидание завершения жеста таймаутом в 800 мс
+        val result = withTimeoutOrNull(800L) {
             suspendCancellableCoroutine<Boolean> { continuation ->
                 try {
                     val path = Path().apply {

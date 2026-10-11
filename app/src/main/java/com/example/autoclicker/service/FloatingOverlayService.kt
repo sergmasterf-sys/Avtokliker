@@ -12,6 +12,7 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.IBinder
+import android.os.SystemClock
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -76,7 +77,7 @@ class FloatingOverlayService : Service(), SettingsPopupWindow.Callbacks {
 
     // Кнопки открытия окон
     private lateinit var btnSmart: Button
-    private lateinit var btnMore: Button
+    private var btnMore: Button? = null
 
     // Свёрнутая кнопка
     private lateinit var floatingBadgeButton: com.example.autoclicker.ui.views.BlackHoleBadgeView
@@ -139,16 +140,24 @@ class FloatingOverlayService : Service(), SettingsPopupWindow.Callbacks {
         EventLogManager.log(EventLogManager.TAG_OVERLAY, "FloatingOverlayService запущен (свёрнут)")
     }
 
+    private var lastNeonUpdateMs = 0L
+
     private fun setupNeonAnimator() {
         neonAnimator = ValueAnimator.ofFloat(0f, 360f).apply {
             duration = 36_000L
             repeatCount = ValueAnimator.INFINITE
             interpolator = LinearInterpolator()
             addUpdateListener { anim ->
-                if (NeonTheme.isAuto) {
-                    NeonTheme.setHue(anim.animatedValue as Float)
-                    expandedLayout.invalidate()
-                    popupWindow.updateNeonColor()
+                if (!isMinimized && expandedLayout.visibility == View.VISIBLE) {
+                    val now = SystemClock.uptimeMillis()
+                    if (now - lastNeonUpdateMs >= 100L) { // не чаще 10 раз в секунду
+                        lastNeonUpdateMs = now
+                        NeonTheme.setHue(anim.animatedValue as Float)
+                        expandedLayout.invalidate()
+                        if (popupWindow.isShowing()) {
+                            popupWindow.updateNeonColor()
+                        }
+                    }
                 }
             }
         }
@@ -447,7 +456,7 @@ class FloatingOverlayService : Service(), SettingsPopupWindow.Callbacks {
         controlRow.addView(stopBtn)
         expandedLayout.addView(controlRow)
 
-        // 4. Ряд кнопок навигации: «Умный» + «Ещё»
+        // 4. Ряд кнопок навигации: «Умный» на всю ширину
         val navRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -457,11 +466,6 @@ class FloatingOverlayService : Service(), SettingsPopupWindow.Callbacks {
             togglePopupWindow(SettingsPopupWindow.WindowType.SMART)
         }
         navRow.addView(btnSmart)
-
-        btnMore = createNavButton("Ещё", 1f) {
-            togglePopupWindow(SettingsPopupWindow.WindowType.MORE)
-        }
-        navRow.addView(btnMore)
 
         expandedLayout.addView(navRow)
     }

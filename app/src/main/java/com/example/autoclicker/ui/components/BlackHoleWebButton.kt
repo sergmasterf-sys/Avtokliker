@@ -49,6 +49,7 @@ fun BlackHoleWebButton(
                         ViewGroup.LayoutParams.MATCH_PARENT
                     )
                     setBackgroundColor(Color.TRANSPARENT)
+                    setLayerType(View.LAYER_TYPE_HARDWARE, null)
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
                     settings.cacheMode = WebSettings.LOAD_DEFAULT
@@ -70,6 +71,21 @@ fun BlackHoleWebButton(
                             view?.evaluateJavascript(
                                 "window.dispatchEvent(new Event('resize'))", null
                             )
+                        }
+
+                        override fun onRenderProcessGone(view: WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
+                            com.example.autoclicker.data.EventLogManager.log(
+                                com.example.autoclicker.data.EventLogManager.TAG_OVERLAY,
+                                "WEBVIEW: Render process gone in BlackHoleWebButton (didCrash=${detail?.didCrash()})",
+                                isError = true
+                            )
+                            try {
+                                view?.let {
+                                    (it.parent as? ViewGroup)?.removeView(it)
+                                    it.destroy()
+                                }
+                            } catch (_: Throwable) {}
+                            return true
                         }
                     }
                     loadUrl("file:///android_asset/black_hole_app.html")

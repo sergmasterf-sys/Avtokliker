@@ -15,8 +15,10 @@ import com.example.autoclicker.R
 import com.example.autoclicker.data.EventLogManager
 import com.example.autoclicker.data.SettingsRepository
 import com.example.autoclicker.service.AccessibilityServiceHolder
+import com.example.autoclicker.service.AccessibilityStatus
 import com.example.autoclicker.service.AutoClickForegroundService
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -66,7 +68,55 @@ class SmartEngine private constructor(
     private val gestureExecutor: GestureExecutor,
     private val settingsRepository: SettingsRepository
 ) {
-    private val coroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    class SimpleLruCache<K, V>(
+        private val maxSize: Int,
+        private val onEvict: ((K, V) -> Unit)? = null
+    ) {
+        private val map = object : LinkedHashMap<K, V>(maxSize, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<K, V>?): Boolean {
+                val should = size > maxSize
+                if (should && eldest != null) {
+                    onEvict?.invoke(eldest.key, eldest.value)
+                }
+                return should
+            }
+        }
+
+        @Synchronized
+        operator fun get(key: K): V? = map[key]
+
+        @Synchronized
+        fun put(key: K, value: V): V? = map.put(key, value)
+
+        @Synchronized
+        operator fun set(key: K, value: V) { map.put(key, value) }
+
+        @Synchronized
+        fun clear() {
+            if (onEvict != null) {
+                for ((k, v) in map) {
+                    onEvict.invoke(k, v)
+                }
+            }
+            map.clear()
+        }
+
+        @Synchronized
+        fun size(): Int = map.size
+
+        @Synchronized
+        fun snapshot(): Map<K, V> = HashMap(map)
+    }
+
+    private val coroutineExceptionHandler = CoroutineExceptionHandler { _, throwable ->
+        val trace = throwable.stackTrace.take(3).joinToString(" <- ") { "${it.className.substringAfterLast('.')}.${it.methodName}:${it.lineNumber}" }
+        EventLogManager.log(
+            EventLogManager.TAG_AUTO_CLICKER,
+            "SMART: Необработанное исключение: ${throwable.javaClass.simpleName}: ${throwable.message} @ $trace",
+            isError = true
+        )
+    }
+    private val coroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default + coroutineExceptionHandler)
     private var engineJob: Job? = null
     private val engineMutex = Mutex()
 
@@ -115,8 +165,9 @@ class SmartEngine private constructor(
     private var lastTapError: String? = null
     private var scanMissStreak = 0
 
-    // used as default afterDelayMs for color matches
-    // companion also defines for external clarity
+    private var runStartTime = 0L
+    private var firstTapDone = false
+    private val autoRestartTimestamps = java.util.concurrent.CopyOnWriteArrayList<Long>()
 
     /** Кэш координат: после первого нахождения кнопки тапаем сюда без долгого поиска */
     private data class CachedCoord(
@@ -130,11 +181,10 @@ class SmartEngine private constructor(
     private val coordCache = java.util.concurrent.ConcurrentHashMap<String, CachedCoord>()
     private var lastCacheScreenW = 0
     private var lastCacheScreenH = 0
-    private var burstUntil = 0L
     private var lastTapAtMs = 0L
     private var scanIndex = 0L
     private val wideSearchTick = java.util.concurrent.ConcurrentHashMap<String, Int>()
-    private val variantBuildCache = HashMap<String, TemplateVariant>()
+    private val variantBuildCache = SimpleLruCache<String, TemplateVariant>(40)
     private var lastYellowRejectLogMs = 0L
 
 
@@ -202,9 +252,38 @@ class SmartEngine private constructor(
         val variants: List<TemplateVariant>
     )
 
-    private val croppedBitmapsCache = mutableMapOf<String, Bitmap>()
+    private val croppedBitmapsCache = SimpleLruCache<String, Bitmap>(40) { _, bmp ->
+        if (!bmp.isRecycled) bmp.recycle()
+    }
     private var cachedRuleTemplates: List<RuleTemplate>? = null
     private var cachedRulesHash: Int = 0
+
+    fun clearCaches(): Long {
+        var estimatedBytes = 0L
+        synchronized(this) {
+            for ((_, bmp) in croppedBitmapsCache.snapshot()) {
+                if (!bmp.isRecycled) {
+                    estimatedBytes += bmp.byteCount
+                    bmp.recycle()
+                }
+            }
+            croppedBitmapsCache.clear()
+            variantBuildCache.clear()
+            coordCache.clear()
+        }
+        return estimatedBytes
+    }
+
+    /**
+     * Потокобезопасная очистка кэшей шаблонов и координат без изменения bitmap активного цикла.
+     */
+    fun clearTemplateAndCoordinateCaches() {
+        synchronized(this) {
+            variantBuildCache.clear()
+            coordCache.clear()
+        }
+        CustomRuleSearch.clearTemplateCaches()
+    }
 
     data class CandidateScanResult(
         val bestStart: FoundMatch?,
@@ -215,7 +294,8 @@ class SmartEngine private constructor(
 
     fun start(): Boolean {
         CustomRuleSearch.clearCaches()
-        if (!AccessibilityServiceHolder.isConnected) {
+        clearScreensDir()
+        if (!AccessibilityServiceHolder.isConnected && !AccessibilityStatus.isEnabledInSystem(context)) {
             EventLogManager.log(
                 EventLogManager.TAG_AUTO_CLICKER,
                 "ERROR: AccessibilityService unavailable. Запуск Smart Mode невозможен.",
@@ -245,6 +325,8 @@ class SmartEngine private constructor(
                 scanCount = 0L
                 nullShotCount = 0L
                 matchCount = 0L
+                runStartTime = System.currentTimeMillis()
+                firstTapDone = false
                 _cycleNumber.value = 1
                 _status.value = CycleStatus.RUNNING
                 _lastAction.value = "START (Smart)"
@@ -257,6 +339,21 @@ class SmartEngine private constructor(
                 val effectiveConfig = configManager.buildEffectiveRules()
 
                 val (realW, realH) = getRealScreenSize()
+                val H = minOf(realW, realH).toFloat()
+                val prepStart = System.currentTimeMillis()
+                val prepped = ensureRuleTemplates(effectiveConfig.rules, realW, realH)
+                val multis = floatArrayOf(0.55f, 0.65f, 0.75f, 0.85f, 0.93f, 1.0f, 1.07f, 1.15f, 1.30f, 1.45f, 1.65f, 1.85f, 2.10f)
+                for (rt in prepped) {
+                    for (m in multis) {
+                        getOrBuildVariant(rt, m, H)
+                    }
+                }
+                val prepMs = System.currentTimeMillis() - prepStart
+                EventLogManager.log(
+                    EventLogManager.TAG_AUTO_CLICKER,
+                    "SMART: шаблоны подготовлены заранее за ${prepMs}мс (вариантов масштаба: ${multis.size})"
+                )
+
                 EventLogManager.log(
                     EventLogManager.TAG_AUTO_CLICKER,
                     "SMART: Умный режим запущен. Разрешение экрана: ${realW}x${realH}"
@@ -428,7 +525,7 @@ class SmartEngine private constructor(
                 scanCount++
                 scanIndex++
                 val shotStart = System.currentTimeMillis()
-                val screenshot = service.takeScreenshotBitmap(minIntervalMs = 1000L)
+                val screenshot = service.takeScreenshotBitmap(minIntervalMs = effectiveConfig.scanIntervalMs.coerceAtLeast(350L))
                 val shotMs = System.currentTimeMillis() - shotStart
                 if (screenshot == null) nullShotCount++
                 val searchStart = System.currentTimeMillis()
@@ -451,15 +548,30 @@ class SmartEngine private constructor(
                         // Поиск кандидатов в порядке приоритета
                         var match: FoundMatch? = null
 
-                        // Если есть встроенное правило "start", проверяем желтую кнопку лобби
-                        if (hasBuiltin && effectiveConfig.rules.any { it.builtin && it.id == "start" }) {
-                            val yellowStart = detectYellowButton(screenshot, 0.0f, 0.42f, 0.65f, 1.0f, "start_yellow", false)
-                            if (yellowStart != null && yellowStart.score >= 0.78f) {
-                                match = yellowStart
+                        // 1. Дешёвые проверки по цвету для встроенных правил ДО тяжелого поиска по шаблону (A)
+                        if (hasBuiltin) {
+                            // Желтая кнопка "start" в лобби
+                            if (effectiveConfig.rules.any { it.builtin && it.id == "start" }) {
+                                val yellowStart = detectYellowButton(screenshot, 0.0f, 0.42f, 0.65f, 1.0f, "start_yellow", false)
+                                if (yellowStart != null && yellowStart.score >= 0.78f) {
+                                    match = yellowStart
+                                }
+                            }
+                            // Синяя или желтая кнопка "continue"
+                            if (match == null && effectiveConfig.rules.any { it.builtin && it.id.startsWith("continue") }) {
+                                val blueContinue = detectBlueButton(screenshot, 0.50f, 1.0f, 0.65f, 1.0f, "continue_blue_color", true)
+                                if (blueContinue != null && blueContinue.score >= 0.78f) {
+                                    match = blueContinue
+                                } else {
+                                    val yellowContinue = detectYellowButton(screenshot, 0.50f, 1.0f, 0.65f, 1.0f, "continue_yellow_color", true)
+                                    if (yellowContinue != null && yellowContinue.score >= 0.78f) {
+                                        match = yellowContinue
+                                    }
+                                }
                             }
                         }
 
-                        // Проверяем шаблоны по правилам
+                        // 2. Проверяем шаблоны по правилам, только если по цвету совпадения не было
                         if (match == null) {
                             val customDir = effectiveConfig.rules.firstOrNull { !it.builtin }?.configDir
                             val preparedCustomRules = CustomRuleSearch.prepareCustomRules(effectiveConfig.rules, customDir)
@@ -495,8 +607,8 @@ class SmartEngine private constructor(
                                 if (rule.builtin) {
                                     val rt = ruleTemplates.firstOrNull { it.rule.id == rule.id }
                                     if (rt != null) {
-                                        val allowWide = System.currentTimeMillis() >= burstUntil ||
-                                            com.example.autoclicker.data.SmartLearnedStore.get(realW, realH, rule.id) == null
+                                        val allowWide = com.example.autoclicker.data.SmartLearnedStore.get(realW, realH, rule.id) == null ||
+                                            (consecutiveNoMatchCount[rule.id] ?: 0) > 0
                                         val smart = evalBuiltinMatchSmart(screenshot, rt, realW, realH, allowWide)
                                         val eval = smart.eval
                                         if (eval.bestScore >= rule.threshold) {
@@ -557,20 +669,15 @@ class SmartEngine private constructor(
                             }
                         }
 
-                        // Если есть встроенные правила "continue", проверяем цвета
-                        if (match == null && hasBuiltin && effectiveConfig.rules.any { it.builtin && it.id.startsWith("continue") }) {
-                            val blueContinue = detectBlueButton(screenshot, 0.50f, 1.0f, 0.65f, 1.0f, "continue_blue_color", true)
-                            if (blueContinue != null && blueContinue.score >= 0.78f) {
-                                match = blueContinue
-                            } else {
-                                val yellowContinue = detectYellowButton(screenshot, 0.50f, 1.0f, 0.65f, 1.0f, "continue_yellow_color", true)
-                                if (yellowContinue != null && yellowContinue.score >= 0.78f) {
-                                    match = yellowContinue
-                                }
-                            }
-                        }
-
                         if (match != null) {
+                            if (!firstTapDone) {
+                                firstTapDone = true
+                                val firstTapMs = System.currentTimeMillis() - runStartTime
+                                EventLogManager.log(
+                                    EventLogManager.TAG_AUTO_CLICKER,
+                                    "SMART: первое нажатие после «Старт» через ${firstTapMs}мс («${match.name}»)"
+                                )
+                            }
                             lastMatchTime = System.currentTimeMillis()
                             lastIdleWarnTime = lastMatchTime
                             matchCount++
@@ -666,13 +773,18 @@ class SmartEngine private constructor(
                                 )
                             }
 
-                            _nextAction.value = "Следующий снимок через 1с"
+                            val nextShotStr = if (effectiveConfig.scanIntervalMs < 1000L) {
+                                "Следующий снимок через ${effectiveConfig.scanIntervalMs}мс"
+                            } else {
+                                "Следующий снимок через ${effectiveConfig.scanIntervalMs / 1000}с"
+                            }
+                            _nextAction.value = nextShotStr
                             val spent = System.currentTimeMillis() - loopStart
                             val searchMs = System.currentTimeMillis() - searchStart
-                            if (scanIndex <= 5L || scanIndex % 30L == 0L || shotMs + searchMs > 700L) {
+                            if (scanIndex <= 20L || scanIndex % 30L == 0L || shotMs + searchMs > 700L) {
                                 EventLogManager.log(
                                     EventLogManager.TAG_AUTO_CLICKER,
-                                    "SMART: время: снимок ${shotMs} мс, поиск ${searchMs} мс"
+                                    "SMART [проход #$scanIndex]: снимок ${shotMs}мс, поиск ${searchMs}мс, всего ${spent}мс"
                                 )
                             }
                             delay((effectiveConfig.scanIntervalMs - spent).coerceAtLeast(50L))
@@ -684,7 +796,12 @@ class SmartEngine private constructor(
                     }
                 } else {
                     _currentAction.value = "Умный режим: ожидание снимка..."
-                    _nextAction.value = "Следующий снимок через 1с"
+                    val nextShotStr = if (effectiveConfig.scanIntervalMs < 1000L) {
+                        "Следующий снимок через ${effectiveConfig.scanIntervalMs}мс"
+                    } else {
+                        "Следующий снимок через ${effectiveConfig.scanIntervalMs / 1000}с"
+                    }
+                    _nextAction.value = nextShotStr
                     val spentNull = System.currentTimeMillis() - loopStart
                     delay((effectiveConfig.scanIntervalMs - spentNull).coerceAtLeast(50L))
                 }
@@ -721,7 +838,7 @@ class SmartEngine private constructor(
                 if (consecutiveErrors >= 10) {
                     EventLogManager.log(
                         EventLogManager.TAG_AUTO_CLICKER,
-                        "SMART: слишком много ошибок подряд",
+                        "SMART: слишком много ошибок подряд (10)",
                         isError = true
                     )
                     endReason = "10 ошибок подряд"
@@ -731,6 +848,30 @@ class SmartEngine private constructor(
                     )
                     resetState()
                     clearScreensDir()
+
+                    // Автоматический перезапуск до 3 раз за час (B.9)
+                    val now = System.currentTimeMillis()
+                    autoRestartTimestamps.removeAll { now - it > 3600_000L }
+                    if (autoRestartTimestamps.size < 3) {
+                        autoRestartTimestamps.add(now)
+                        val attempt = autoRestartTimestamps.size
+                        EventLogManager.log(
+                            EventLogManager.TAG_AUTO_CLICKER,
+                            "SMART: Авто-перезапуск после ошибок (попытка $attempt из 3 за час)..."
+                        )
+                        coroutineScope.launch {
+                            delay(3000L)
+                            if (endReason == "10 ошибок подряд") {
+                                start()
+                            }
+                        }
+                    } else {
+                        EventLogManager.log(
+                            EventLogManager.TAG_AUTO_CLICKER,
+                            "SMART: Превышен лимит авто-перезапусков (3 за час). Режим остановлен.",
+                            isError = true
+                        )
+                    }
                     return
                 }
 
@@ -1068,43 +1209,39 @@ class SmartEngine private constructor(
 
         // Ступень 3: широкий поиск
         if (allowWide) {
-            val tick = (wideSearchTick[rule.id] ?: 0) + 1
-            wideSearchTick[rule.id] = tick
-            if (tick % 3 == 1) {
-                val (rx0, rx1, ry0, ry1) = if (rule.id.contains("continue")) {
-                    floatArrayOf(0.30f, 1.0f, 0.45f, 1.0f)
-                } else {
-                    floatArrayOf(0.0f, 0.80f, 0.30f, 1.0f)
+            val (rx0, rx1, ry0, ry1) = if (rule.id.contains("continue")) {
+                floatArrayOf(0.30f, 1.0f, 0.45f, 1.0f)
+            } else {
+                floatArrayOf(0.0f, 0.80f, 0.30f, 1.0f)
+            }
+            val roi = createDownsampledRoi(screenshot, rx0, rx1, ry0, ry1)
+            if (roi != null) {
+                var bestScore = -1f
+                var bestScale = 0f
+                var bestCoords = Pair(0f, 0f)
+                var bestM = 1f
+                val multis = floatArrayOf(0.55f, 0.65f, 0.75f, 0.85f, 1.15f, 1.30f, 1.45f, 1.65f, 1.85f, 2.10f)
+                for (m in multis) {
+                    val v = getOrBuildVariant(ruleTemplate, m, H)
+                    val (score, coords) = searchTemplateInRoi(roi, v)
+                    if (score > bestScore) {
+                        bestScore = score
+                        bestScale = baseScale * v.scaleMultiplier
+                        bestCoords = coords
+                        bestM = m
+                    }
                 }
-                val roi = createDownsampledRoi(screenshot, rx0, rx1, ry0, ry1)
-                if (roi != null) {
-                    var bestScore = -1f
-                    var bestScale = 0f
-                    var bestCoords = Pair(0f, 0f)
-                    var bestM = 1f
-                    val multis = floatArrayOf(0.55f, 0.65f, 0.75f, 0.85f, 1.15f, 1.30f, 1.45f, 1.65f, 1.85f, 2.10f)
-                    for (m in multis) {
-                        val v = getOrBuildVariant(ruleTemplate, m, H)
-                        val (score, coords) = searchTemplateInRoi(roi, v)
-                        if (score > bestScore) {
-                            bestScore = score
-                            bestScale = baseScale * v.scaleMultiplier
-                            bestCoords = coords
-                            bestM = m
-                        }
-                    }
-                    if (bestScore >= rule.threshold) {
-                        com.example.autoclicker.data.SmartLearnedStore.put(
-                            realW, realH, rule.id, bestM,
-                            bestCoords.first / screenshot.width,
-                            bestCoords.second / screenshot.height,
-                            bestScore
-                        )
-                        return BuiltinSmartEval(
-                            MatchEval(bestScore, bestScale, bestCoords.first, bestCoords.second),
-                            "изображение", 3, bestM
-                        )
-                    }
+                if (bestScore >= rule.threshold) {
+                    com.example.autoclicker.data.SmartLearnedStore.put(
+                        realW, realH, rule.id, bestM,
+                        bestCoords.first / screenshot.width,
+                        bestCoords.second / screenshot.height,
+                        bestScore
+                    )
+                    return BuiltinSmartEval(
+                        MatchEval(bestScore, bestScale, bestCoords.first, bestCoords.second),
+                        "изображение", 3, bestM
+                    )
                 }
             }
         }
@@ -1895,8 +2032,8 @@ class SmartEngine private constructor(
                 bitmap.compress(Bitmap.CompressFormat.JPEG, 85, out)
             }
             val files = dir.listFiles()?.filter { it.extension == "jpg" }?.sortedBy { it.lastModified() }
-            if (files != null && files.size > 3) {
-                val toDelete = files.take(files.size - 3)
+            if (files != null && files.size > 5) {
+                val toDelete = files.take(files.size - 5)
                 toDelete.forEach { it.delete() }
             }
         } catch (_: Exception) {}
@@ -1905,13 +2042,25 @@ class SmartEngine private constructor(
     private fun clearScreensDir() {
         try {
             val dir = File(context.cacheDir, "screens")
-            dir.listFiles()?.forEach { it.delete() }
+            if (dir.exists()) {
+                dir.listFiles()?.forEach { file ->
+                    if (file.isDirectory) file.deleteRecursively() else file.delete()
+                }
+            }
         } catch (_: Exception) {}
     }
 
     companion object {
         @Volatile
         private var INSTANCE: SmartEngine? = null
+
+        fun clearGlobalCaches(): Long {
+            return INSTANCE?.clearCaches() ?: 0L
+        }
+
+        fun clearGlobalTemplateAndCoordinateCaches() {
+            INSTANCE?.clearTemplateAndCoordinateCaches() ?: CustomRuleSearch.clearTemplateCaches()
+        }
 
         fun getInstance(
             context: Context,

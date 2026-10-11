@@ -49,8 +49,8 @@ object NeonTheme {
         val p = context.applicationContext.getSharedPreferences("neon_theme", Context.MODE_PRIVATE)
         prefs = p
         manualHue = p.getFloat("manual_hue", BASE_HUE)
-        isAuto = p.getBoolean("auto", true)
-        if (isAuto) epoch = SystemClock.elapsedRealtime() - hueToOffsetMs(p.getFloat("last_hue", BASE_HUE))
+        isAuto = true
+        epoch = SystemClock.elapsedRealtime() - hueToOffsetMs(p.getFloat("last_hue", BASE_HUE))
     }
 
     private fun hueToOffsetMs(h: Float): Long {

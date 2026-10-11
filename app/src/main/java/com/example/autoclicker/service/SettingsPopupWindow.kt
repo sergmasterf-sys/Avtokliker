@@ -380,6 +380,23 @@ class SettingsPopupWindow(
             setPadding(dp(8), dp(2), dp(8), dp(8))
         })
 
+        // ===== ДОПОЛНИТЕЛЬНО (ПЕРЕНЕСЕНО ИЗ «ЕЩЁ») =====
+        container.addView(neonLabel(context, "ДЕЙСТВИЯ"))
+        container.addView(
+            fullButton(glassButton(context, "Открыть приложение", 44f, 18f, 40f, false, 12f) {
+                callbacks.onOpenMainActivity()
+                dismiss()
+            }, heightDp = 42, bottomDp = 8)
+        )
+        container.addView(
+            fullButton(glassButton(context, "Сбросить ВСЁ", 44f, 18f, -110f, false, 12f) {
+                showConfirmDialog("Вы уверены?", "Сбросить все настройки и режимы?") {
+                    com.example.autoclicker.data.ResetManager.resetAll(context)
+                    populateContent(WindowType.SMART)
+                }
+            }.apply { setTextColor(0xFFFF8A80.toInt()) }, heightDp = 42, bottomDp = 4)
+        )
+
     }
 
     // ===== «ЕЩЁ» =====

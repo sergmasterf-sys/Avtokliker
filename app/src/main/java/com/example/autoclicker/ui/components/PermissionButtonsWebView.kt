@@ -84,6 +84,21 @@ fun PermissionButtonsWebView(
                     override fun onPageFinished(view: WebView?, url: String?) {
                         applyState(view, isOverlayGranted, isAccessibilityGranted, showLaunchButton, launchOnly)
                     }
+
+                    override fun onRenderProcessGone(view: WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
+                        com.example.autoclicker.data.EventLogManager.log(
+                            com.example.autoclicker.data.EventLogManager.TAG_OVERLAY,
+                            "WEBVIEW: Render process gone in PermissionButtonsWebView (didCrash=${detail?.didCrash()})",
+                            isError = true
+                        )
+                        try {
+                            view?.let {
+                                (it.parent as? ViewGroup)?.removeView(it)
+                                it.destroy()
+                            }
+                        } catch (_: Throwable) {}
+                        return true
+                    }
                 }
                 loadUrl("file:///android_asset/permission_buttons.html")
             }

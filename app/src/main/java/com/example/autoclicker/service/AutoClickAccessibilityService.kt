@@ -54,6 +54,9 @@ class AutoClickAccessibilityService : AccessibilityService() {
         screenshotExecutor.shutdown()
     }
 
+    @Volatile
+    private var lastScreenshotErrorCode = 0
+
     suspend fun takeScreenshotCompat(): Bitmap? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
             EventLogManager.log(EventLogManager.TAG_AUTO_CLICKER, "SMART: Скриншот не поддерживается на Android < 11")
@@ -67,24 +70,34 @@ class AutoClickAccessibilityService : AccessibilityService() {
                     screenshotExecutor,
                     object : TakeScreenshotCallback {
                         override fun onSuccess(screenshotResult: ScreenshotResult) {
+                            lastScreenshotErrorCode = 0
+                            var hardwareBuffer: android.hardware.HardwareBuffer? = null
+                            var wrappedBitmap: Bitmap? = null
+                            var copy: Bitmap? = null
                             try {
-                                val hardwareBuffer = screenshotResult.hardwareBuffer
+                                hardwareBuffer = screenshotResult.hardwareBuffer
                                 val colorSpace = screenshotResult.colorSpace
-                                val bitmap = Bitmap.wrapHardwareBuffer(hardwareBuffer, colorSpace)
-                                val copy = bitmap?.copy(Bitmap.Config.ARGB_8888, false)
-                                hardwareBuffer.close()
-                                if (continuation.isActive) {
-                                    continuation.resume(copy)
+                                if (hardwareBuffer != null) {
+                                    wrappedBitmap = Bitmap.wrapHardwareBuffer(hardwareBuffer, colorSpace)
+                                    copy = wrappedBitmap?.copy(Bitmap.Config.ARGB_8888, false)
                                 }
                             } catch (e: Exception) {
                                 EventLogManager.log(EventLogManager.TAG_AUTO_CLICKER, "SMART: Ошибка обработки скриншота: ${e.message}")
-                                if (continuation.isActive) {
-                                    continuation.resume(null)
-                                }
+                            } finally {
+                                try {
+                                    wrappedBitmap?.recycle()
+                                } catch (_: Throwable) {}
+                                try {
+                                    hardwareBuffer?.close()
+                                } catch (_: Throwable) {}
+                            }
+                            if (continuation.isActive) {
+                                continuation.resume(copy)
                             }
                         }
 
                         override fun onFailure(errorCode: Int) {
+                            lastScreenshotErrorCode = errorCode
                             val n = System.currentTimeMillis()
                             if (n - lastShotFailLogAt > 5000L) {
                                 lastShotFailLogAt = n
@@ -108,13 +121,21 @@ class AutoClickAccessibilityService : AccessibilityService() {
     private var lastScreenshotAt = 0L
     private var lastShotFailLogAt = 0L
 
-    suspend fun takeScreenshotBitmap(minIntervalMs: Long = 1000L): Bitmap? {
-        val interval = minIntervalMs.coerceAtLeast(1000L) // не чаще 1 раза в секунду
+    suspend fun takeScreenshotBitmap(minIntervalMs: Long = 350L): Bitmap? {
+        val interval = minIntervalMs.coerceAtLeast(350L)
         val now = System.currentTimeMillis()
         val wait = interval - (now - lastScreenshotAt)
         if (wait > 0) kotlinx.coroutines.delay(wait)
         lastScreenshotAt = System.currentTimeMillis()
-        return takeScreenshotCompat()
+        var bmp = takeScreenshotCompat()
+        if (bmp == null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+            lastScreenshotErrorCode == ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT
+        ) {
+            kotlinx.coroutines.delay(150L)
+            lastScreenshotAt = System.currentTimeMillis()
+            bmp = takeScreenshotCompat()
+        }
+        return bmp
     }
 
     companion object {
