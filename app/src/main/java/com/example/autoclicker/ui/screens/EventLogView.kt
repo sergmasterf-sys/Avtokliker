@@ -9,10 +9,12 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -51,6 +53,8 @@ fun EventLogView(
 ) {
     val context = LocalContext.current
     var showClearConfirm by remember { mutableStateOf(false) }
+    var showRecentLinesDialog by remember { mutableStateOf(false) }
+    var recentLinesText by remember { mutableStateOf("") }
 
     val logFiles = remember(logs) { LogFileManager.listLogFiles() }
     val totalSize = remember(logs) { LogFileManager.totalSizeBytes() }
@@ -61,17 +65,17 @@ fun EventLogView(
             .fillMaxWidth()
             .testTag("event_log_container")
     ) {
-        GlassLabel("ЖУРНАЛ СОБЫТИЙ (ПОСЛЕДНИЕ 30)")
+        GlassLabel("ЖУРНАЛ СОБЫТИЙ")
 
-        // Строка с количеством файлов и размером
+        // Строка с количеством файлов и размером (хранятся 2 суток)
         Text(
-            text = "Файлов логов: ${logFiles.size}, размер $sizeKb КБ, хранятся 7 суток",
+            text = "Файлов: ${logFiles.size}, размер $sizeKb КБ, хранятся 2 суток",
             color = TextSecondary,
             fontSize = 12.sp,
             modifier = Modifier.padding(start = 4.dp, bottom = 8.dp)
         )
 
-        // Ряд кнопок: «Скопировать», «Скачать», «Поделиться», «Очистить»
+        // Первый ряд кнопок: «Скопировать», «Поделиться», «Сохранить»
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -95,6 +99,23 @@ fun EventLogView(
 
             GlassButton(
                 onClick = {
+                    val shareIntent = LogExporter.createShareIntent(context)
+                    if (shareIntent != null) {
+                        context.startActivity(shareIntent)
+                    } else {
+                        Toast.makeText(context, "Логов нет", Toast.LENGTH_SHORT).show()
+                    }
+                },
+                modifier = Modifier.weight(1f),
+                height = 36.dp,
+                cornerRadius = 16.dp,
+                hueOffset = 25f
+            ) {
+                Text("Поделиться", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            }
+
+            GlassButton(
+                onClick = {
                     val fileName = LogExporter.saveToDownloads(context)
                     if (fileName != null) {
                         Toast.makeText(context, "Сохранено в Загрузки: $fileName", Toast.LENGTH_LONG).show()
@@ -110,26 +131,35 @@ fun EventLogView(
                 modifier = Modifier.weight(1f),
                 height = 36.dp,
                 cornerRadius = 16.dp,
-                hueOffset = 25f
-            ) {
-                Text("Скачать", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-            }
-
-            GlassButton(
-                onClick = {
-                    val shareIntent = LogExporter.createShareIntent(context)
-                    if (shareIntent != null) {
-                        context.startActivity(shareIntent)
-                    } else {
-                        Toast.makeText(context, "Логов нет", Toast.LENGTH_SHORT).show()
-                    }
-                },
-                modifier = Modifier.weight(1f),
-                height = 36.dp,
-                cornerRadius = 16.dp,
                 hueOffset = 40f
             ) {
-                Text("Поделиться", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                Text("Сохранить", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+
+        Spacer(modifier = Modifier.height(6.dp))
+
+        // Второй ряд кнопок: «Последние 100 строк» и «Очистить логи»
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            GlassButton(
+                onClick = {
+                    val lines = LogFileManager.readLastLines(100)
+                    if (lines.isBlank()) {
+                        Toast.makeText(context, "Журнал пуст", Toast.LENGTH_SHORT).show()
+                    } else {
+                        recentLinesText = lines
+                        showRecentLinesDialog = true
+                    }
+                },
+                modifier = Modifier.weight(1.5f),
+                height = 36.dp,
+                cornerRadius = 16.dp,
+                hueOffset = 55f
+            ) {
+                Text("Показать 100 строк", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
             }
 
             GlassButton(
@@ -186,22 +216,59 @@ fun EventLogView(
             }
         }
 
+        // Диалог подтверждения очистки логов
         if (showClearConfirm) {
             GlassDialog(
-                title = "Вы уверены?",
+                title = "Очистить логи?",
                 onDismissRequest = { showClearConfirm = false },
                 onConfirm = {
                     showClearConfirm = false
                     onClearLogs()
+                    Toast.makeText(context, "Журнал очищен", Toast.LENGTH_SHORT).show()
                 },
                 confirmText = "Очистить",
                 cancelText = "Отмена"
             ) {
                 Text(
-                    text = "Все события и файлы логов будут безвозвратно удалены.",
+                    text = "Все события и файлы логов за 2 суток будут безвозвратно удалены.",
                     color = Color.White,
                     fontSize = 14.sp
                 )
+            }
+        }
+
+        // Диалог просмотра последних 100 строк логов с выделением и кнопкой копирования
+        if (showRecentLinesDialog) {
+            GlassDialog(
+                title = "Последние 100 строк",
+                onDismissRequest = { showRecentLinesDialog = false },
+                onConfirm = {
+                    val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText("AutoClicker recent logs", recentLinesText))
+                    Toast.makeText(context, "Строки скопированы", Toast.LENGTH_SHORT).show()
+                    showRecentLinesDialog = false
+                },
+                confirmText = "Копировать",
+                cancelText = "Закрыть"
+            ) {
+                SelectionContainer {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 350.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color(0xFF070810))
+                            .padding(8.dp)
+                    ) {
+                        Text(
+                            text = recentLinesText,
+                            color = Color(0xFFD6DBE7),
+                            fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace,
+                            lineHeight = 14.sp
+                        )
+                    }
+                }
             }
         }
     }

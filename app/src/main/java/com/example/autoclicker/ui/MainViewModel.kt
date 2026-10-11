@@ -25,6 +25,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val settings: StateFlow<ClickerSettings> = repo.settings
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), repo.getLatestSettings())
 
+    val logs: StateFlow<List<String>> = EventLogManager.logs
+
+    fun clearLogs() {
+        EventLogManager.clearAll()
+    }
+
     val isAccessibilityConnected: StateFlow<Boolean> =
         AccessibilityServiceHolder.service
             .map { it != null }

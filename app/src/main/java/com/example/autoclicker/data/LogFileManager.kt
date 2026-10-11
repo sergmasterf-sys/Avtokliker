@@ -7,6 +7,7 @@ import android.provider.Settings
 import android.util.Log
 import java.io.File
 import java.io.FileWriter
+import java.io.RandomAccessFile
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -16,7 +17,7 @@ import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 
 /**
- * Файловые логи: один txt на сутки, 7 дней хранения.
+ * Файловые логи: один txt на сутки, 2 суток хранения (сегодня и вчера).
  * Шапка: версия, устройство, Android, разрешения, режим.
  */
 object LogFileManager {
@@ -24,8 +25,8 @@ object LogFileManager {
     private const val DIR_NAME = "logs"
     private const val FILE_PREFIX = "log_"
     private const val FILE_EXT = ".txt"
-    const val RETENTION_DAYS = 7
-    private const val MAX_FILE_BYTES = 25L * 1024 * 1024
+    const val RETENTION_DAYS = 2
+    private const val MAX_FILE_BYTES = 10L * 1024 * 1024 // 10 МБ лимит в сутки
     private const val PREFS = "log_session"
     private const val KEY_LAST_ALIVE = "last_alive_ms"
     private const val KEY_SESSION_OPEN = "session_open"
@@ -42,7 +43,7 @@ object LogFileManager {
     private val lineFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
 
     private var lastCleanupDay = ""
-    private var sizeWarned = false
+    private var lastCleanupCheckTime = 0L
     private var headerWrittenForDay = ""
 
     val isInitialized: Boolean get() = appContext != null
@@ -58,6 +59,8 @@ object LogFileManager {
         val lastAlive = prefs.getLong(KEY_LAST_ALIVE, 0L)
         prefs.edit().putBoolean(KEY_SESSION_OPEN, true)
             .putLong(KEY_LAST_ALIVE, System.currentTimeMillis()).apply()
+
+        cleanupOld()
 
         writeHeaderIfNeeded(System.currentTimeMillis())
         append(System.currentTimeMillis(), "PROCESS", "=== Процесс приложения запущен ===", false)
@@ -179,6 +182,49 @@ object LogFileManager {
         return File(dir, FILE_PREFIX + fmt.format(Date(timeMs)) + FILE_EXT)
     }
 
+    /**
+     * Проверка и усечение файла: если размер превысил MAX_FILE_BYTES,
+     * удаляем старую половину файла и оставляем самые свежие строки.
+     */
+    private fun trimFileIfOverLimit(file: File) {
+        if (!file.exists() || file.length() <= MAX_FILE_BYTES) return
+        try {
+            val totalLen = file.length()
+            val halfLen = totalLen / 2
+            val tempFile = File(file.parentFile, "${file.name}.tmp")
+
+            RandomAccessFile(file, "r").use { raf ->
+                raf.seek(halfLen)
+                // Пропускаем остаток разорванной строки
+                while (true) {
+                    val b = raf.read()
+                    if (b == -1 || b == '\n'.code) break
+                }
+                val remainingBytes = totalLen - raf.filePointer
+                if (remainingBytes > 0) {
+                    tempFile.outputStream().use { out ->
+                        out.write("[LOG] I === Старая половина файла журнала очищена из-за лимита 10 МБ ===\n".toByteArray(Charsets.UTF_8))
+                        val buffer = ByteArray(64 * 1024)
+                        var read: Int
+                        while (raf.read(buffer).also { read = it } != -1) {
+                            out.write(buffer, 0, read)
+                        }
+                    }
+                }
+            }
+
+            if (tempFile.exists() && tempFile.length() > 0) {
+                if (file.delete()) {
+                    tempFile.renameTo(file)
+                } else {
+                    tempFile.delete()
+                }
+            }
+        } catch (t: Throwable) {
+            Log.e("LogFileManager", "Ошибка усечения лог-файла: ${t.message}")
+        }
+    }
+
     fun append(timeMs: Long, tag: String, message: String, isError: Boolean) {
         if (appContext == null) return
         writer.execute {
@@ -186,20 +232,18 @@ object LogFileManager {
                 writeHeaderIfNeeded(timeMs)
                 val file = fileForTime(timeMs, dayFormat) ?: return@execute
                 val day = dayFormat.format(Date(timeMs))
-                if (day != lastCleanupDay) {
+
+                // Проверка смены суток или интервала 10 минут
+                val now = System.currentTimeMillis()
+                if (day != lastCleanupDay || now - lastCleanupCheckTime > 10 * 60 * 1000L) {
                     lastCleanupDay = day
-                    sizeWarned = false
+                    lastCleanupCheckTime = now
                     cleanupOld()
                 }
-                if (file.exists() && file.length() > MAX_FILE_BYTES) {
-                    if (!sizeWarned) {
-                        sizeWarned = true
-                        FileWriter(file, true).use {
-                            it.write("${lineFormat.format(Date(timeMs))} [LOG] E Файл достиг лимита ${MAX_FILE_BYTES / 1024 / 1024} МБ\n")
-                        }
-                    }
-                    return@execute
-                }
+
+                // Усечение при превышении 10 МБ: удаляет старую половину и продолжает писать
+                trimFileIfOverLimit(file)
+
                 val level = if (isError) "E" else "I"
                 FileWriter(file, true).use {
                     it.write("${lineFormat.format(Date(timeMs))} [$tag] $level $message\n")
@@ -210,6 +254,9 @@ object LogFileManager {
         }
     }
 
+    /**
+     * Удаляет файлы логов старше 2 суток (сегодняшний и вчерашний остаются).
+     */
     fun cleanupOld() {
         val dir = logsDir() ?: return
         val cal = Calendar.getInstance()
@@ -258,6 +305,27 @@ object LogFileManager {
         }
         val text = sb.toString()
         return if (text.length > maxChars) text.substring(text.length - maxChars) else text
+    }
+
+    /**
+     * Читает последние N строк из логов.
+     */
+    fun readLastLines(maxLines: Int = 100): String {
+        flush()
+        val files = listLogFiles() // от новых к старым
+        val collectedLines = mutableListOf<String>()
+        for (f in files) {
+            try {
+                val lines = f.readLines()
+                for (i in lines.indices.reversed()) {
+                    collectedLines.add(lines[i])
+                    if (collectedLines.size >= maxLines) break
+                }
+            } catch (_: Throwable) {}
+            if (collectedLines.size >= maxLines) break
+        }
+        collectedLines.reverse()
+        return collectedLines.joinToString("\n")
     }
 
     fun totalSizeBytes(): Long = listLogFiles().sumOf { it.length() }
