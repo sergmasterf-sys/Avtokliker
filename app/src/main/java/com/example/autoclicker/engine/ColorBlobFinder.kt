@@ -77,6 +77,32 @@ object ColorBlobFinder {
     }
 
     /**
+     * Проверка бледного серо-голубого цвета кнопки «Продолжить» в HSV:
+     * Hue: 180..210 градусов, Saturation: 0.15..0.40, Value: 0.50..0.90.
+     */
+    fun isPaleBlueHsv(r: Int, g: Int, b: Int): Boolean {
+        val max = maxOf(r, maxOf(g, b))
+        // Value: 0.50..0.90 (0.50 * 255 = 127, 0.90 * 255 = 229)
+        val v = max / 255f
+        if (v < 0.50f || v > 0.90f) return false
+        val min = minOf(r, minOf(g, b))
+        val delta = max - min
+        if (delta == 0) return false
+        val sat = delta.toFloat() / max
+        if (sat < 0.15f || sat > 0.40f) return false
+
+        val hue = when (max) {
+            r -> {
+                val h = 60f * (g - b).toFloat() / delta
+                if (h < 0f) h + 360f else h
+            }
+            g -> 60f * (((b - r).toFloat() / delta) + 2f)
+            else -> 60f * (((r - g).toFloat() / delta) + 4f)
+        }
+        return hue in 180f..210f
+    }
+
+    /**
      * Поиск связных компонент по сетке (step):
      * 1. Булева сетка по шагу step.
      * 2. Морфологическое закрытие 5x5 для устранения дырок от черного/темного текста внутри кнопки.
@@ -353,6 +379,39 @@ object ColorBlobFinder {
             maxAspect = 6.5f,
             minDensity = 0.45f,
             isColor = ::isBlueHsv
+        )
+    }
+
+    /**
+     * Поиск кнопки «Продолжить» (pale=true — бледная серо-голубая, pale=false — жёлтая MVP).
+     * Фильтры: ширина 8%..22% экрана, высота 4%..9%, пропорция 2.2..5.0, minDensity 0.5.
+     */
+    fun findContinueButton(
+        pixels: IntArray,
+        width: Int,
+        height: Int,
+        step: Int = 2,
+        screenW: Int,
+        screenH: Int,
+        pale: Boolean
+    ): Result {
+        val minAllowedW = (screenW * 0.08f).toInt()
+        val maxAllowedW = (screenW * 0.22f).toInt()
+        val minAllowedH = (screenH * 0.04f).toInt()
+        val maxAllowedH = (screenH * 0.09f).toInt()
+        return findBlobs(
+            pixels = pixels,
+            width = width,
+            height = height,
+            step = step,
+            minAllowedW = minAllowedW,
+            maxAllowedW = maxAllowedW,
+            minAllowedH = minAllowedH,
+            maxAllowedH = maxAllowedH,
+            minAspect = 2.2f,
+            maxAspect = 5.0f,
+            minDensity = 0.5f,
+            isColor = if (pale) ::isPaleBlueHsv else ::isYellowHsv
         )
     }
 }
