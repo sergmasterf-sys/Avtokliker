@@ -65,7 +65,7 @@ fun EventLogView(
             .fillMaxWidth()
             .testTag("event_log_container")
     ) {
-        GlassLabel("ЖУРНАЛ СОБЫТИЙ")
+        GlassLabel("ЖУРНАЛ")
 
         // Строка с количеством файлов и размером (хранятся 2 суток)
         Text(
@@ -75,7 +75,7 @@ fun EventLogView(
             modifier = Modifier.padding(start = 4.dp, bottom = 8.dp)
         )
 
-        // Первый ряд кнопок: «Скопировать», «Поделиться», «Сохранить»
+        // Первый ряд кнопок: «Скопировать логи», «Поделиться», «Сохранить файл»
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -89,12 +89,12 @@ fun EventLogView(
                         Toast.makeText(context, "Логи скопированы", Toast.LENGTH_SHORT).show()
                     }
                 },
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1.2f),
                 height = 36.dp,
                 cornerRadius = 16.dp,
                 hueOffset = 10f
             ) {
-                Text("Скопировать", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                Text("Скопировать логи", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
             }
 
             GlassButton(
@@ -128,18 +128,18 @@ fun EventLogView(
                         }
                     }
                 },
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1.1f),
                 height = 36.dp,
                 cornerRadius = 16.dp,
                 hueOffset = 40f
             ) {
-                Text("Сохранить", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                Text("Сохранить файл", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
             }
         }
 
         Spacer(modifier = Modifier.height(6.dp))
 
-        // Второй ряд кнопок: «Последние 100 строк» и «Очистить логи»
+        // Второй ряд кнопок: «Показать 100 строк» и «Очистить логи»
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -169,7 +169,7 @@ fun EventLogView(
                 cornerRadius = 16.dp,
                 hueOffset = -60f
             ) {
-                Text("Очистить", color = AccentRed, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                Text("Очистить логи", color = AccentRed, fontSize = 11.sp, fontWeight = FontWeight.Bold)
             }
         }
 

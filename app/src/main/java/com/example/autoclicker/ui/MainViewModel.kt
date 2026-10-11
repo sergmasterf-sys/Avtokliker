@@ -27,8 +27,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val logs: StateFlow<List<String>> = EventLogManager.logs
 
+    val learnedCount: StateFlow<Int> = com.example.autoclicker.data.SmartLearnedStore.countFlow
+
     fun clearLogs() {
         EventLogManager.clearAll()
+    }
+
+    fun clearLearnedCoordinates() {
+        com.example.autoclicker.data.SmartLearnedStore.clear()
+        com.example.autoclicker.engine.SmartEngine.clearGlobalTemplateAndCoordinateCaches()
+        EventLogManager.log(EventLogManager.TAG_AUTO_CLICKER, "SMART: хранилище выученных координат очищено")
     }
 
     val isAccessibilityConnected: StateFlow<Boolean> =

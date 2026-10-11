@@ -27,11 +27,15 @@ object SmartLearnedStore {
     @Volatile
     private var prefs: SharedPreferences? = null
 
+    private val _countFlow = kotlinx.coroutines.flow.MutableStateFlow(0)
+    val countFlow: kotlinx.coroutines.flow.StateFlow<Int> = _countFlow
+
     fun init(context: Context) {
         if (prefs == null) {
             synchronized(this) {
                 if (prefs == null) {
                     prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    _countFlow.value = count()
                 }
             }
         }
@@ -114,6 +118,7 @@ object SmartLearnedStore {
             // Также сохраняем по legacy-ключу для обратной совместимости
             .putString(legacyKey(screenW, screenH, ruleId), "$multiplier;$xFrac;$yFrac;$score")
             .apply()
+        _countFlow.value = count()
     }
 
     /**
@@ -138,5 +143,6 @@ object SmartLearnedStore {
      */
     fun clear() {
         prefs?.edit()?.clear()?.apply()
+        _countFlow.value = 0
     }
 }

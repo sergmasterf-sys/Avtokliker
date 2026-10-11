@@ -22,12 +22,18 @@ class MainActivity : ComponentActivity() {
                 val accConnected by viewModel.isAccessibilityConnected.collectAsState()
                 val accEnabled by viewModel.isAccessibilityEnabledInSystem.collectAsState()
                 val overlayGranted by viewModel.isOverlayGranted.collectAsState()
+                val logs by viewModel.logs.collectAsState()
+                val learnedCount by viewModel.learnedCount.collectAsState()
 
                 MainScreen(
                     settings = settings,
                     isAccessibilityConnected = accConnected,
                     isOverlayGranted = overlayGranted,
                     isAccessibilityEnabledInSystem = accEnabled,
+                    logs = logs,
+                    learnedCount = learnedCount,
+                    onClearLogs = { viewModel.clearLogs() },
+                    onClearLearnedCoordinates = { viewModel.clearLearnedCoordinates() },
                     onOpenAccessibilitySettings = { viewModel.openAccessibilitySettings() },
                     onOpenOverlaySettings = { viewModel.openOverlaySettings() },
                     onLaunchOverlayService = { viewModel.launchOverlayService() }

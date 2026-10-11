@@ -366,6 +366,33 @@ class SettingsPopupWindow(
             )
         )
 
+        // ===== ЖУРНАЛ (B.4) =====
+        container.addView(neonLabel(context, "ЖУРНАЛ"))
+        container.addView(
+            fullButton(
+                glassButton(context, "Скопировать логи", hueOffset = 30f, textSp = 12f) {
+                    val ok = com.example.autoclicker.data.LogExporter.copyToClipboard(context)
+                    val msg = if (ok) "Логи скопированы" else "Логов нет"
+                    android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT).show()
+                }, heightDp = 40, bottomDp = 8
+            )
+        )
+
+        val learnedCount = com.example.autoclicker.data.SmartLearnedStore.count()
+        container.addView(
+            fullButton(
+                glassButton(context, "Забыть координаты ($learnedCount)", hueOffset = -60f, textSp = 12f) {
+                    showConfirmDialog("Забыть координаты?", "Удалить все выученные позиции кнопок?") {
+                        com.example.autoclicker.data.SmartLearnedStore.clear()
+                        SmartEngine.clearGlobalTemplateAndCoordinateCaches()
+                        EventLogManager.log(EventLogManager.TAG_AUTO_CLICKER, "SMART: хранилище выученных координат очищено")
+                        android.widget.Toast.makeText(context, "Координаты забыты", android.widget.Toast.LENGTH_SHORT).show()
+                        populateContent(WindowType.SMART)
+                    }
+                }, heightDp = 38, bottomDp = 8
+            )
+        )
+
         // ===== НАСТРОЙКИ ПЛАВАЮЩЕЙ КНОПКИ =====
         container.addView(neonLabel(context, "ПЛАВАЮЩАЯ КНОПКА"))
         container.addView(

@@ -536,19 +536,73 @@ object CustomRuleSearch {
     }
 
     /**
+     * Быстрый поиск в малом окне вокруг сохранённого центра (размер шаблона + 15% с каждой стороны, масштаб ± 4%).
+     */
+    fun findCustomMatchFast(
+        screenshot: Bitmap,
+        rule: SmartRule,
+        preparedRules: List<PreparedCustomRule>,
+        learned: com.example.autoclicker.data.SmartLearnedStore.Learned
+    ): CustomEval? {
+        val prepared = preparedRules.firstOrNull { it.rule.id == rule.id } ?: return null
+        if (prepared.images.isEmpty()) return null
+
+        val base = minOf(screenshot.width, screenshot.height).toFloat() / minOf(rule.refWidth, rule.refHeight)
+        val deadline = System.nanoTime() + 100_000_000L // до 100 мс
+
+        var bestScore = -1f
+        var bestScale = learned.multiplier
+
+        for (img in prepared.images) {
+            val templW = img.bitmap.width * base * learned.multiplier * img.sampleSize
+            val templH = img.bitmap.height * base * learned.multiplier * img.sampleSize
+
+            // Размер шаблона плюс запас 15% с каждой стороны
+            val halfSpanX = (templW * 0.65f) / screenshot.width
+            val halfSpanY = (templH * 0.65f) / screenshot.height
+
+            val fracX0 = (learned.xFrac - halfSpanX).coerceIn(0f, 1f)
+            val fracX1 = (learned.xFrac + halfSpanX).coerceIn(0f, 1f)
+            val fracY0 = (learned.yFrac - halfSpanY).coerceIn(0f, 1f)
+            val fracY1 = (learned.yFrac + halfSpanY).coerceIn(0f, 1f)
+
+            val roi = createDownsampledRoiN(screenshot, fracX0, fracX1, fracY0, fracY1, factor = 2) ?: continue
+            val scales = floatArrayOf(learned.multiplier * 0.96f, learned.multiplier, learned.multiplier * 1.04f)
+
+            for (m in scales) {
+                val scale = m * img.sampleSize
+                val variant = getOrComputeVariant(rule.id, img.index, img.bitmap, scale, factor = 2) ?: continue
+                val res = searchTemplateInRoiN(roi, variant, step = 1, deadline, refineMinScore = 0.5f)
+                if (res.score > bestScore) {
+                    bestScore = res.score
+                    bestScale = m
+                }
+            }
+        }
+
+        if (bestScore >= (rule.threshold - 0.05f)) {
+            val clickX = learned.xFrac * screenshot.width
+            val clickY = learned.yFrac * screenshot.height
+            return CustomEval(bestScore, bestScale, clickX, clickY, timedOut = false)
+        }
+        return null
+    }
+
+    /**
      * 4.3. Поиск пользовательского правила (грубый проход + точный проход + общий дедлайн).
      */
     fun findCustomMatch(
         screenshot: Bitmap,
         rule: SmartRule,
-        preparedRules: List<PreparedCustomRule>
+        preparedRules: List<PreparedCustomRule>,
+        deadlineNanos: Long = 0L
     ): CustomEval {
         val prepared = preparedRules.firstOrNull { it.rule.id == rule.id }
         if (prepared == null || prepared.images.isEmpty()) {
             return CustomEval(score = -1f, absoluteScale = 0f, x = 0f, y = 0f, timedOut = false)
         }
 
-        val deadline = System.nanoTime() + 1_200_000_000L
+        val deadline = if (deadlineNanos > 0L) deadlineNanos else (System.nanoTime() + 1_200_000_000L)
 
         val base = minOf(screenshot.width, screenshot.height).toFloat() / minOf(rule.refWidth, rule.refHeight)
 

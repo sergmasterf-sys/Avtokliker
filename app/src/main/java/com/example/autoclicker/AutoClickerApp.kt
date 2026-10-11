@@ -22,6 +22,7 @@ class AutoClickerApp : Application() {
     override fun onCreate() {
         super.onCreate()
         LogFileManager.init(this)
+        com.example.autoclicker.data.SmartLearnedStore.init(this)
         EventLogManager.log(EventLogManager.TAG_SYSTEM, "Application.onCreate")
 
         // 1. Очистка старых временных файлов и скриншотов в cacheDir

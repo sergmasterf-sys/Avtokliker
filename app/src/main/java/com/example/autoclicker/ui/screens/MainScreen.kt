@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -17,7 +18,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -33,6 +37,11 @@ import androidx.compose.ui.unit.sp
 import com.example.autoclicker.data.ClickerSettings
 import com.example.autoclicker.data.SettingsRepository
 import com.example.autoclicker.ui.components.PermissionButtonsWebView
+import com.example.autoclicker.ui.theme.AccentRed
+import com.example.autoclicker.ui.theme.GlassButton
+import com.example.autoclicker.ui.theme.GlassDialog
+import com.example.autoclicker.ui.theme.GlassLabel
+import com.example.autoclicker.ui.theme.GlassPanel
 import com.example.autoclicker.ui.theme.LocalNeonHue
 import com.example.autoclicker.ui.theme.NeonFrame
 import com.example.autoclicker.ui.theme.NeonTheme
@@ -48,6 +57,10 @@ fun MainScreen(
     isAccessibilityConnected: Boolean,
     isOverlayGranted: Boolean,
     isAccessibilityEnabledInSystem: Boolean = false,
+    logs: List<String> = emptyList(),
+    learnedCount: Int = 0,
+    onClearLogs: () -> Unit = {},
+    onClearLearnedCoordinates: () -> Unit = {},
     onOpenAccessibilitySettings: () -> Unit,
     onOpenOverlaySettings: () -> Unit,
     onLaunchOverlayService: () -> Unit,
@@ -56,6 +69,7 @@ fun MainScreen(
     val context = LocalContext.current
     remember { NeonTheme.init(context); true }
     val neonBriFraction = settings.neonBrightness / 100f
+    var showForgetConfirm by remember { mutableStateOf(false) }
 
     ProvideNeon(brightness = neonBriFraction) {
         val currentHue = LocalNeonHue.current
@@ -202,6 +216,51 @@ fun MainScreen(
                         },
                         modifier = Modifier.fillMaxWidth()
                     )
+
+                    Spacer(Modifier.height(14.dp))
+
+                    // Блок «Запомненные кнопки» (A.8)
+                    GlassPanel(
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        GlassLabel("ЗАПОМНЕННЫЕ КНОПКИ")
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 4.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Запомнено правил: $learnedCount",
+                                color = Color(0xFFD6DBE7),
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                            GlassButton(
+                                onClick = { showForgetConfirm = true },
+                                height = 34.dp,
+                                cornerRadius = 14.dp,
+                                hueOffset = -60f
+                            ) {
+                                Text(
+                                    text = "Забыть координаты",
+                                    color = AccentRed,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(14.dp))
+
+                    // Блок «Журнал» (B.3)
+                    EventLogView(
+                        logs = logs,
+                        onClearLogs = onClearLogs,
+                        modifier = Modifier.fillMaxWidth()
+                    )
                 }
 
                 // Неоновая рамка поверх карточки
@@ -209,6 +268,26 @@ fun MainScreen(
                     cornerRadius = cardRadius,
                     modifier = Modifier.matchParentSize()
                 )
+
+                if (showForgetConfirm) {
+                    GlassDialog(
+                        title = "Забыть координаты?",
+                        onDismissRequest = { showForgetConfirm = false },
+                        onConfirm = {
+                            showForgetConfirm = false
+                            onClearLearnedCoordinates()
+                            Toast.makeText(context, "Координаты забыты", Toast.LENGTH_SHORT).show()
+                        },
+                        confirmText = "Забыть",
+                        cancelText = "Отмена"
+                    ) {
+                        Text(
+                            text = "Все выученные позиции кнопок будут удалены из памяти и хранилища. Потребуется повторное обучение.",
+                            color = Color.White,
+                            fontSize = 14.sp
+                        )
+                    }
+                }
             }
         }
     }
