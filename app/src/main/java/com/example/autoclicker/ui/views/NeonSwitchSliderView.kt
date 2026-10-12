@@ -263,61 +263,26 @@ class NeonSwitchSliderView @JvmOverloads constructor(
             panelR - 1f * s, panelR - 1f * s, strokePaint
         )
 
-        // 4. Кружки-индикаторы (dot.l и dot.rt)
-        // dot: top 15px, width 8px, height 8px (center at (15+4)*s, (15+4)*s = 19*s, 19*s)
+        // 4. Индикаторы на панели (гнёзда)
         val dotR = 4f * s
         val dotLeftCx = (15f + 4f) * s
         val dotLeftCy = (15f + 4f) * s
         val dotRightCx = (81f + 4f) * s
         val dotRightCy = (15f + 4f) * s
 
-        // Левая точка (красная)
-        if (!visualOn) {
-            // Активная: background #ff3a4b, box-shadow 0 0 4px 1px var(--r), 0 0 10px 2px rgba(255,42,61,.6), inset 0 0 2px #ffb3ba
-            glowPaint.color = colorRed
-            glowPaint.setShadowLayer(10f * s, 0f, 0f, Color.argb(160, 255, 42, 61))
-            canvas.drawCircle(dotLeftCx, dotLeftCy, dotR, glowPaint)
-            glowPaint.setShadowLayer(4f * s, 0f, 0f, colorRed)
-            canvas.drawCircle(dotLeftCx, dotLeftCy, dotR, glowPaint)
-            glowPaint.clearShadowLayer()
+        // Левое гнездо: видно открытым, когда ручка справа (в активном режиме)
+        fillPaint.color = Color.parseColor("#200D11")
+        canvas.drawCircle(dotLeftCx, dotLeftCy, dotR, fillPaint)
+        strokePaint.strokeWidth = 1f * s
+        strokePaint.color = Color.argb(180, 0, 0, 0)
+        canvas.drawCircle(dotLeftCx, dotLeftCy, dotR - 0.5f * s, strokePaint)
 
-            fillPaint.color = Color.parseColor("#FF3A4B")
-            canvas.drawCircle(dotLeftCx, dotLeftCy, dotR, fillPaint)
-
-            fillPaint.color = Color.parseColor("#FFB3BA")
-            canvas.drawCircle(dotLeftCx, dotLeftCy, dotR * 0.45f, fillPaint)
-        } else {
-            // Выключенная: background #2c1115
-            fillPaint.color = Color.parseColor("#2C1115")
-            canvas.drawCircle(dotLeftCx, dotLeftCy, dotR, fillPaint)
-            strokePaint.strokeWidth = 1f * s
-            strokePaint.color = Color.argb(180, 0, 0, 0)
-            canvas.drawCircle(dotLeftCx, dotLeftCy, dotR - 0.5f * s, strokePaint)
-        }
-
-        // Правая точка (салатовая)
-        if (visualOn) {
-            // Активная: background #7dff5a, box-shadow 0 0 4px 1px var(--g), 0 0 10px 2px rgba(57,255,20,.6), inset 0 0 2px #e4ffd9
-            glowPaint.color = colorGreen
-            glowPaint.setShadowLayer(10f * s, 0f, 0f, Color.argb(160, 57, 255, 20))
-            canvas.drawCircle(dotRightCx, dotRightCy, dotR, glowPaint)
-            glowPaint.setShadowLayer(4f * s, 0f, 0f, colorGreen)
-            canvas.drawCircle(dotRightCx, dotRightCy, dotR, glowPaint)
-            glowPaint.clearShadowLayer()
-
-            fillPaint.color = Color.parseColor("#7DFF5A")
-            canvas.drawCircle(dotRightCx, dotRightCy, dotR, fillPaint)
-
-            fillPaint.color = Color.parseColor("#E4FFD9")
-            canvas.drawCircle(dotRightCx, dotRightCy, dotR * 0.45f, fillPaint)
-        } else {
-            // Выключенная: background #16231a
-            fillPaint.color = Color.parseColor("#16231A")
-            canvas.drawCircle(dotRightCx, dotRightCy, dotR, fillPaint)
-            strokePaint.strokeWidth = 1f * s
-            strokePaint.color = Color.argb(180, 0, 0, 0)
-            canvas.drawCircle(dotRightCx, dotRightCy, dotR - 0.5f * s, strokePaint)
-        }
+        // Правое гнездо: видно открытым, когда ручка слева (в неактивном режиме)
+        fillPaint.color = Color.parseColor("#0E1A11")
+        canvas.drawCircle(dotRightCx, dotRightCy, dotR, fillPaint)
+        strokePaint.strokeWidth = 1f * s
+        strokePaint.color = Color.argb(180, 0, 0, 0)
+        canvas.drawCircle(dotRightCx, dotRightCy, dotR - 0.5f * s, strokePaint)
 
         // 5. Ручка-бульбашка (#knob)
         // left: 5px + offset, top: 5px, width: 28px, height: 28px
@@ -334,20 +299,54 @@ class NeonSwitchSliderView @JvmOverloads constructor(
         canvas.drawCircle(kcx, kcy, knobR, shadowPaint)
         shadowPaint.clearShadowLayer()
 
-        // Тело стекла ручки (замена backdrop-filter: blur(1px) saturate(1.4))
-        fillPaint.color = Color.argb(120, 20, 22, 32)
+        // Полупрозрачное тело стекла ручки
+        fillPaint.color = Color.argb(85, 18, 20, 28)
         canvas.drawCircle(kcx, kcy, knobR, fillPaint)
 
-        // Радиальный градиент стекла (50% 50% rgba(255,255,255,0) 50% to rgba(255,255,255,.16) 100%)
+        // СВЕТЯЩИЙСЯ ЦВЕТНОЙ КРУЖОК В ЦЕНТРЕ РУЧКИ:
+        // В активном режиме — ярко-зеленый неон, в неактивном — ярко-красный неон
+        val centerDotR = 4.5f * s
+        if (visualOn) {
+            // Зеленый индикатор в центре ручки
+            glowPaint.color = colorGreen
+            glowPaint.setShadowLayer(10f * s, 0f, 0f, Color.argb(220, 57, 255, 20))
+            canvas.drawCircle(kcx, kcy, centerDotR, glowPaint)
+            glowPaint.setShadowLayer(4f * s, 0f, 0f, colorGreen)
+            canvas.drawCircle(kcx, kcy, centerDotR, glowPaint)
+            glowPaint.clearShadowLayer()
+
+            fillPaint.color = Color.parseColor("#7DFF5A")
+            canvas.drawCircle(kcx, kcy, centerDotR, fillPaint)
+
+            fillPaint.color = Color.parseColor("#E4FFD9")
+            canvas.drawCircle(kcx, kcy, centerDotR * 0.45f, fillPaint)
+        } else {
+            // Красный индикатор в центре ручки
+            glowPaint.color = colorRed
+            glowPaint.setShadowLayer(10f * s, 0f, 0f, Color.argb(220, 255, 42, 61))
+            canvas.drawCircle(kcx, kcy, centerDotR, glowPaint)
+            glowPaint.setShadowLayer(4f * s, 0f, 0f, colorRed)
+            canvas.drawCircle(kcx, kcy, centerDotR, glowPaint)
+            glowPaint.clearShadowLayer()
+
+            fillPaint.color = Color.parseColor("#FF3A4B")
+            canvas.drawCircle(kcx, kcy, centerDotR, fillPaint)
+
+            fillPaint.color = Color.parseColor("#FFB3BA")
+            canvas.drawCircle(kcx, kcy, centerDotR * 0.45f, fillPaint)
+        }
+
+        // Радиальный градиент стекла (от прозрачного центра к краю)
         fillPaint.shader = RadialGradient(
             kcx, kcy, knobR,
-            intArrayOf(Color.TRANSPARENT, Color.argb(41, 255, 255, 255)),
-            floatArrayOf(0.50f, 1f),
+            intArrayOf(Color.TRANSPARENT, Color.argb(35, 255, 255, 255)),
+            floatArrayOf(0.55f, 1f),
             Shader.TileMode.CLAMP
         )
         canvas.drawCircle(kcx, kcy, knobR, fillPaint)
+        fillPaint.shader = null
 
-        // Блик стекла (70% 75% rgba(255,255,255,.5) 0 to rgba(255,255,255,0) 9%)
+        // Блик стекла
         fillPaint.shader = RadialGradient(
             kcx + knobR * 0.40f, kcy + knobR * 0.50f, knobR * 0.60f,
             intArrayOf(Color.argb(128, 255, 255, 255), Color.TRANSPARENT),
@@ -357,10 +356,8 @@ class NeonSwitchSliderView @JvmOverloads constructor(
         canvas.drawCircle(kcx, kcy, knobR, fillPaint)
         fillPaint.shader = null
 
-        // Радужная плёнка по краю (статично, animation film без постоянной перерисовки):
-        // conic-gradient (255,90,170), (90,200,255), (130,255,170), (255,225,100), (255,90,170)
-        // маска radial-gradient 52% to 78%
-        strokePaint.strokeWidth = knobR * 0.28f // 78% - 52% = 26%
+        // Радужная плёнка по краю (статично, кольцо 52%..78%, центр открыт)
+        strokePaint.strokeWidth = knobR * 0.28f
         strokePaint.shader = SweepGradient(
             kcx, kcy,
             intArrayOf(
