@@ -68,11 +68,10 @@ class FloatingOverlayService : Service() {
     private lateinit var timerText: TextView
     private lateinit var lastTapText: TextView
     private lateinit var clockText: TextView
-    private lateinit var startBtn: NeonGlassButton
-    private lateinit var stopBtn: NeonGlassButton
+    private lateinit var switchSlider: com.example.autoclicker.ui.views.NeonSwitchSliderView
 
     // Свёрнутая кнопка
-    private lateinit var floatingBadgeButton: com.example.autoclicker.ui.views.BlackHoleBadgeView
+    private lateinit var floatingBadgeButton: com.example.autoclicker.ui.views.NeonPowerBadgeView
 
     private var isMinimized = true
 
@@ -239,7 +238,7 @@ class FloatingOverlayService : Service() {
 
     @SuppressLint("ClickableViewAccessibility")
     private fun createMinimizedBadge() {
-        floatingBadgeButton = com.example.autoclicker.ui.views.BlackHoleBadgeView(this).apply {
+        floatingBadgeButton = com.example.autoclicker.ui.views.NeonPowerBadgeView(this).apply {
             val sizePx = dpToPx(badgeCfg.size)
             layoutParams = FrameLayout.LayoutParams(sizePx, sizePx)
             isRunning = false
@@ -262,6 +261,7 @@ class FloatingOverlayService : Service() {
                 val params = overlayParams ?: return@setOnTouchListener false
                 when (event.action) {
                     MotionEvent.ACTION_DOWN -> {
+                        pressedLook = true
                         initialX = params.x
                         initialY = params.y
                         initialTouchX = event.rawX
@@ -276,6 +276,7 @@ class FloatingOverlayService : Service() {
                         val dy = (event.rawY - initialTouchY).toInt()
                         if (abs(dx) > 10 || abs(dy) > 10) {
                             isClick = false
+                            pressedLook = false
                         }
                         val (sw, sh) = screenSize()
                         val side = dpToPx(badgeCfg.size)
@@ -287,6 +288,7 @@ class FloatingOverlayService : Service() {
                         true
                     }
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        pressedLook = false
                         badgeDragging = false
                         if (event.action == MotionEvent.ACTION_UP && isClick) {
                             setMode(minimized = false)
@@ -431,47 +433,29 @@ class FloatingOverlayService : Service() {
         }
         expandedLayout.addView(lastTapText)
 
-        // 3. Ряд кнопок START / STOP
-        val controlRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, 0, 0, dpToPx(8))
-        }
-
-        startBtn = NeonGlassButton(this).apply {
-            text = "START"
-            setTextColor(Color.WHITE)
-            textSize = 12f
-            typeface = Typeface.DEFAULT_BOLD
-            cornerDp = 16f
-            val lp = LinearLayout.LayoutParams(0, dpToPx(44), 1f).apply { marginEnd = dpToPx(6) }
-            layoutParams = lp
-            setOnClickListener {
-                val res = RunCoordinator.start(applicationContext)
-                if (res.anyStarted) {
-                    setMode(minimized = true)
+        // 3. Неоновый ползунок-переключатель (вместо START/STOP)
+        switchSlider = com.example.autoclicker.ui.views.NeonSwitchSliderView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                gravity = Gravity.CENTER_HORIZONTAL
+                bottomMargin = dpToPx(8)
+            }
+            onToggle = { active ->
+                if (active) {
+                    val res = RunCoordinator.start(applicationContext)
+                    if (res.anyStarted) {
+                        setMode(minimized = true)
+                    } else {
+                        setOn(false, notify = false, animate = true)
+                    }
+                } else {
+                    RunCoordinator.stopAll(applicationContext, "ползунок")
                 }
             }
         }
-
-        stopBtn = NeonGlassButton(this).apply {
-            text = "STOP"
-            setTextColor(Color.WHITE)
-            textSize = 12f
-            typeface = Typeface.DEFAULT_BOLD
-            cornerDp = 16f
-            hueOffset = -110f
-            isEnabled = false
-            alpha = 0.5f
-            val lp = LinearLayout.LayoutParams(0, dpToPx(44), 1f).apply { marginStart = dpToPx(6) }
-            layoutParams = lp
-            setOnClickListener {
-                RunCoordinator.stopAll(applicationContext, "кнопка Стоп")
-            }
-        }
-
-        controlRow.addView(startBtn)
-        controlRow.addView(stopBtn)
-        expandedLayout.addView(controlRow)
+        expandedLayout.addView(switchSlider)
     }
 
     private fun showCloseAutoClickerDialog() {
@@ -604,26 +588,10 @@ class FloatingOverlayService : Service() {
                 )
 
                 if (status == CycleStatus.RUNNING || status == CycleStatus.WAITING_CYCLE) {
-                    startBtn.text = "▶ ЗАПУЩЕНО"
-                    startBtn.isOn = true
-                    startBtn.isEnabled = false
-                    startBtn.alpha = 1.0f
-
-                    stopBtn.isEnabled = true
-                    stopBtn.alpha = 1.0f
-                    stopBtn.isOn = true
-
+                    switchSlider.setOn(true, notify = false, animate = true)
                     floatingBadgeButton.isRunning = true
                 } else {
-                    startBtn.text = "START"
-                    startBtn.isOn = false
-                    startBtn.isEnabled = true
-                    startBtn.alpha = 1.0f
-
-                    stopBtn.isEnabled = false
-                    stopBtn.alpha = 0.5f
-                    stopBtn.isOn = false
-
+                    switchSlider.setOn(false, notify = false, animate = true)
                     floatingBadgeButton.isRunning = false
                 }
             }
