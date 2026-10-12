@@ -19,7 +19,6 @@ import android.view.View
 import android.view.WindowManager
 import android.view.Choreographer
 import android.view.animation.LinearInterpolator
-import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -27,7 +26,6 @@ import com.example.autoclicker.MainActivity
 import com.example.autoclicker.data.ClickerSettings
 import com.example.autoclicker.data.EventLogManager
 import com.example.autoclicker.data.SettingsRepository
-import com.example.autoclicker.data.SmartConfigManager
 import com.example.autoclicker.engine.CycleStatus
 import com.example.autoclicker.engine.GestureExecutor
 import com.example.autoclicker.engine.RunCoordinator
@@ -51,15 +49,12 @@ import kotlin.math.sin
  *   - Заголовок «Автокликер» с «—» и «✕»
  *   - Статус (STATUS, NEXT, TIMER, последнее нажатие)
  *   - Кнопки START и STOP
- *   - Кнопки: [Умный] [Ещё]
- * - Отдельные окна настроек SettingsPopupWindow (TYPE_APPLICATION_OVERLAY)
  */
-class FloatingOverlayService : Service(), SettingsPopupWindow.Callbacks {
+class FloatingOverlayService : Service() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private lateinit var windowManager: WindowManager
     private lateinit var settingsRepo: SettingsRepository
-    private lateinit var configManager: SmartConfigManager
     private lateinit var smartEngine: SmartEngine
     private val gestureExecutor = GestureExecutor()
 
@@ -76,21 +71,13 @@ class FloatingOverlayService : Service(), SettingsPopupWindow.Callbacks {
     private lateinit var startBtn: NeonGlassButton
     private lateinit var stopBtn: NeonGlassButton
 
-    // Кнопки открытия окон
-    private lateinit var btnSmart: Button
-    private var btnMore: Button? = null
-
     // Свёрнутая кнопка
     private lateinit var floatingBadgeButton: com.example.autoclicker.ui.views.BlackHoleBadgeView
-
-    // Отдельное окно настроек
-    private lateinit var popupWindow: SettingsPopupWindow
 
     private var isMinimized = true
 
     // ===== Плавающая кнопка =====
     private var badgeCfg: BadgeCfg = BadgeCfg()
-    private var badgeSettingsWindow: BadgeSettingsWindow? = null
     private var badgeDragging = false
     private var floatRunning = false
     private var floatLastNanos = 0L
@@ -120,24 +107,18 @@ class FloatingOverlayService : Service(), SettingsPopupWindow.Callbacks {
         super.onCreate()
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         settingsRepo = SettingsRepository.getInstance(applicationContext)
-        configManager = SmartConfigManager.getInstance(applicationContext)
         smartEngine = SmartEngine.getInstance(applicationContext, gestureExecutor, settingsRepo)
 
-        popupWindow = SettingsPopupWindow(
-            context = this,
-            windowManager = windowManager,
-            settingsRepo = settingsRepo,
-            configManager = configManager,
-            smartEngine = smartEngine,
-            callbacks = this
-        )
+        // Переключателя режимов в интерфейсе больше нет: всегда работает умный режим
+        try {
+            if (!settingsRepo.getLatestSettings().isSmartMode) settingsRepo.updateSmartMode(true)
+        } catch (_: Exception) {
+        }
 
-        badgeCfg = BadgePrefs.load(this)
         setupNeonAnimator()
         startAccessibilityWatcher()
         createOverlay()
         observeControllerState()
-        observeSettingsChanges()
 
         EventLogManager.log(EventLogManager.TAG_OVERLAY, "FloatingOverlayService запущен (свёрнут)")
     }
@@ -156,9 +137,6 @@ class FloatingOverlayService : Service(), SettingsPopupWindow.Callbacks {
                         lastNeonUpdateMs = now
                         NeonTheme.setHue(anim.animatedValue as Float)
                         expandedLayout.invalidate()
-                        if (popupWindow.isShowing()) {
-                            popupWindow.updateNeonColor()
-                        }
                     }
                 }
             }
@@ -250,7 +228,6 @@ class FloatingOverlayService : Service(), SettingsPopupWindow.Callbacks {
             expandedLayout.visibility = View.GONE
             floatingBadgeButton.visibility = View.VISIBLE
             neonAnimator?.pause()
-            popupWindow.dismiss()
         } else {
             floatingBadgeButton.visibility = View.GONE
             expandedLayout.visibility = View.VISIBLE
@@ -495,47 +472,6 @@ class FloatingOverlayService : Service(), SettingsPopupWindow.Callbacks {
         controlRow.addView(startBtn)
         controlRow.addView(stopBtn)
         expandedLayout.addView(controlRow)
-
-        // 4. Ряд кнопок навигации: «Умный» на всю ширину
-        val navRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-
-        btnSmart = createNavButton("Умный", 1f) {
-            togglePopupWindow(SettingsPopupWindow.WindowType.SMART)
-        }
-        navRow.addView(btnSmart)
-
-        expandedLayout.addView(navRow)
-    }
-
-    private fun createNavButton(label: String, weight: Float, onClick: () -> Unit): Button {
-        return NeonGlassButton(this).apply {
-            text = label
-            textSize = 12f
-            setTextColor(Color.WHITE)
-            typeface = Typeface.DEFAULT_BOLD
-            cornerDp = 16f
-            hueOffset = when (label) { "Умный" -> 30f; else -> 45f }
-            val lp = LinearLayout.LayoutParams(0, dpToPx(42), weight).apply {
-                marginEnd = dpToPx(4)
-            }
-            layoutParams = lp
-            setPadding(dpToPx(4), 0, dpToPx(4), 0)
-            setOnClickListener { onClick() }
-        }
-    }
-
-    private fun togglePopupWindow(type: SettingsPopupWindow.WindowType) {
-        if (popupWindow.isShowing() && popupWindow.currentType == type) {
-            popupWindow.dismiss()
-        } else {
-            val p = overlayParams ?: return
-            val w = expandedLayout.width.takeIf { it > 0 } ?: dpToPx(280)
-            val h = expandedLayout.height.takeIf { it > 0 } ?: dpToPx(200)
-            popupWindow.show(type, p.x, p.y, w, h)
-        }
     }
 
     private fun showCloseAutoClickerDialog() {
@@ -567,55 +503,9 @@ class FloatingOverlayService : Service(), SettingsPopupWindow.Callbacks {
         }
     }
 
-    override fun onOpenMainActivity() {
-        val intent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
-        }
-        startActivity(intent)
-    }
-
-    override fun onCloseService() {
+    private fun onCloseService() {
         shutdownAllWindowsAndServices()
         AutoClickForegroundService.stop(applicationContext)
-    }
-
-    override fun onDismiss() {}
-
-    override fun onOpenBadgeSettings() {
-        openBadgeSettings()
-    }
-
-    private fun openBadgeSettings() {
-        try {
-            popupWindow.dismiss()
-        } catch (_: Exception) {
-        }
-        setMode(minimized = true)
-        if (badgeSettingsWindow == null) {
-            badgeSettingsWindow = BadgeSettingsWindow(
-                context = this,
-                windowManager = windowManager,
-                onChanged = { applyBadgeCfg(it) },
-                onClosed = {
-                    overlayParams?.let { settingsRepo.updateOverlayPosition(it.x, it.y) }
-                    updateFloat()
-                }
-            )
-        }
-        badgeSettingsWindow?.show(badgeCfg)
-        rootContainer?.postDelayed({ clampRootToScreen() }, 80)
-        updateFloat()
-    }
-
-    private fun applyBadgeCfg(cfg: BadgeCfg) {
-        badgeCfg = cfg
-        if (!::floatingBadgeButton.isInitialized) return
-        val sizePx = dpToPx(cfg.size)
-        floatingBadgeButton.layoutParams = FrameLayout.LayoutParams(sizePx, sizePx)
-        floatingBadgeButton.alpha = cfg.opacity / 100f
-        floatingBadgeButton.ringAlways = cfg.ringAlways
-        rootContainer?.postDelayed({ clampRootToScreen() }, 80)
-        updateFloat()
     }
 
     private fun updateFloat() {
@@ -689,14 +579,6 @@ class FloatingOverlayService : Service(), SettingsPopupWindow.Callbacks {
             try {
                 windowManager.updateViewLayout(root, params)
             } catch (_: Exception) {}
-        }
-    }
-
-    private fun observeSettingsChanges() {
-        serviceScope.launch {
-            settingsRepo.settings.collect { settings ->
-                popupWindow.updateSettings(settings)
-            }
         }
     }
 
@@ -778,8 +660,6 @@ class FloatingOverlayService : Service(), SettingsPopupWindow.Callbacks {
 
     private fun shutdownAllWindowsAndServices() {
         stopFloat()
-        try { badgeSettingsWindow?.dismiss() } catch (_: Exception) {}
-        popupWindow.dismiss()
         rootContainer?.let {
             try {
                 windowManager.removeView(it)
@@ -792,10 +672,8 @@ class FloatingOverlayService : Service(), SettingsPopupWindow.Callbacks {
     override fun onDestroy() {
         super.onDestroy()
         stopFloat()
-        try { badgeSettingsWindow?.dismiss() } catch (_: Exception) {}
         neonAnimator?.cancel()
         serviceScope.cancel()
-        popupWindow.dismiss()
         rootContainer?.let {
             try {
                 windowManager.removeView(it)

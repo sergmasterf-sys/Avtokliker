@@ -41,8 +41,16 @@ class AutoClickAccessibilityService : AccessibilityService() {
         instance = null
         AccessibilityServiceHolder.setService(null)
         AccessibilityStatus.setRunning(false)
-        EventLogManager.log(EventLogManager.TAG_ACCESSIBILITY, "ACCESSIBILITY: Сервис отключен")
-        return super.onUnbind(intent)
+        EventLogManager.log(EventLogManager.TAG_ACCESSIBILITY, "ACCESSIBILITY: Сервис отвязан системой (onUnbind)")
+        return true
+    }
+
+    override fun onRebind(intent: Intent?) {
+        super.onRebind(intent)
+        instance = this
+        AccessibilityServiceHolder.setService(this)
+        AccessibilityStatus.setRunning(true)
+        EventLogManager.log(EventLogManager.TAG_ACCESSIBILITY, "ACCESSIBILITY: Сервис переподключен (onRebind)")
     }
 
     override fun onDestroy() {

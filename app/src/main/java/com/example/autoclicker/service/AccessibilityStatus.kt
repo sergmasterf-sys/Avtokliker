@@ -16,34 +16,53 @@ object AccessibilityStatus {
     }
 
     /**
-     * Сервис включён в системных настройках (не обязательно уже привязан к процессу).
+     * Сервис включён в системных настройках или уже активен в процессе.
      */
     fun isEnabledInSystem(context: Context): Boolean {
+        // 1. Если сервис уже подключен и работает в процессе — он гарантированно включен
+        if (AccessibilityServiceHolder.isConnected || AutoClickAccessibilityService.instance != null) {
+            return true
+        }
+
+        val targetClass = AutoClickAccessibilityService::class.java.simpleName
+        val targetFullClass = AutoClickAccessibilityService::class.java.name
+
+        // 2. Проверка через AccessibilityManager (официальный API Android)
         try {
             val am = context.getSystemService(Context.ACCESSIBILITY_SERVICE) as? AccessibilityManager
             if (am != null) {
-                val list = am.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
-                val target = ComponentName(context, AutoClickAccessibilityService::class.java)
-                val hit = list.any { info ->
-                    val si = info.resolveInfo?.serviceInfo ?: return@any false
-                    si.packageName == target.packageName && si.name == target.className
+                val enabledList = mutableListOf<AccessibilityServiceInfo>()
+                try {
+                    enabledList.addAll(am.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK))
+                } catch (_: Exception) {}
+                try {
+                    enabledList.addAll(am.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_GENERIC))
+                } catch (_: Exception) {}
+
+                val hit = enabledList.any { info ->
+                    val id = info.id ?: ""
+                    val siName = info.resolveInfo?.serviceInfo?.name ?: ""
+                    id.contains(targetClass, ignoreCase = true) ||
+                        siName.contains(targetClass, ignoreCase = true) ||
+                        id.contains(targetFullClass, ignoreCase = true) ||
+                        siName.contains(targetFullClass, ignoreCase = true)
                 }
                 if (hit) return true
             }
         } catch (_: Exception) {
         }
+
+        // 3. Fallback: проверка через Settings.Secure (сохраняет доступ даже если сервис временно отвязался)
         return try {
             val raw = Settings.Secure.getString(
                 context.contentResolver,
                 Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
             ) ?: return false
-            val target = ComponentName(context, AutoClickAccessibilityService::class.java)
-            val flat = target.flattenToString()
-            val short = target.flattenToShortString()
+
             raw.split(':').any { part ->
                 val p = part.trim()
-                p.equals(flat, true) || p.equals(short, true) ||
-                    (p.contains(target.packageName) && p.contains(target.className.substringAfterLast('.')))
+                p.contains(targetClass, ignoreCase = true) ||
+                    p.contains(targetFullClass, ignoreCase = true)
             }
         } catch (_: Exception) {
             false

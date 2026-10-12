@@ -13,10 +13,12 @@ import com.example.autoclicker.data.SettingsRepository
 import com.example.autoclicker.service.AccessibilityServiceHolder
 import com.example.autoclicker.service.AccessibilityStatus
 import com.example.autoclicker.service.FloatingOverlayService
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -42,27 +44,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val isAccessibilityConnected: StateFlow<Boolean> =
         AccessibilityServiceHolder.service
             .map { it != null }
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), AccessibilityServiceHolder.isConnected)
+            .stateIn(viewModelScope, SharingStarted.Eagerly, AccessibilityServiceHolder.isConnected)
 
-    val isAccessibilityEnabledInSystem: StateFlow<Boolean> =
-        kotlinx.coroutines.flow.flow {
+    private val _isAccessibilityEnabledInSystem = kotlinx.coroutines.flow.MutableStateFlow(
+        AccessibilityStatus.isEnabledInSystem(application)
+    )
+    val isAccessibilityEnabledInSystem: StateFlow<Boolean> = _isAccessibilityEnabledInSystem
+
+    private val _isOverlayGranted = kotlinx.coroutines.flow.MutableStateFlow(
+        Settings.canDrawOverlays(application)
+    )
+    val isOverlayGranted: StateFlow<Boolean> = _isOverlayGranted
+
+    fun refreshPermissions() {
+        val app = getApplication<Application>()
+        _isAccessibilityEnabledInSystem.value = AccessibilityStatus.isEnabledInSystem(app)
+        _isOverlayGranted.value = Settings.canDrawOverlays(app)
+    }
+
+    init {
+        viewModelScope.launch {
             while (true) {
-                emit(AccessibilityStatus.isEnabledInSystem(getApplication()))
+                refreshPermissions()
                 kotlinx.coroutines.delay(1000)
             }
-        }.stateIn(
-            viewModelScope,
-            SharingStarted.WhileSubscribed(5000),
-            AccessibilityStatus.isEnabledInSystem(application)
-        )
-
-    val isOverlayGranted: StateFlow<Boolean> =
-        kotlinx.coroutines.flow.flow {
-            while (true) {
-                emit(Settings.canDrawOverlays(getApplication()))
-                kotlinx.coroutines.delay(1000)
-            }
-        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), Settings.canDrawOverlays(application))
+        }
+    }
 
     fun openAccessibilitySettings() {
         val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {

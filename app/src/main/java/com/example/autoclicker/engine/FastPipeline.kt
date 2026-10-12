@@ -292,11 +292,11 @@ class FastPipeline(
             val loopStart = System.currentTimeMillis()
 
             // Интервал снимков зависит от состояния:
-            // IN_MATCH: опрос раз в 700 мс (тапов в игру нет, только проверка кнопок)
+            // IN_MATCH: опрос раз в 1200 мс (тапов в игру нет, только проверка кнопок)
             // LOBBY: опрос каждые ~350 мс
             // RESULT: опрос каждые ~300-350 мс
             val interval = when (state) {
-                State.IN_MATCH -> 700L
+                State.IN_MATCH -> 1200L
                 State.LOBBY -> 350L
                 State.RESULT -> 350L
                 State.UNKNOWN -> 350L
