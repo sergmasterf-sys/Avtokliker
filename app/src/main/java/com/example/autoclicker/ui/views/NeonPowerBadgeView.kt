@@ -17,7 +17,8 @@ import android.widget.FrameLayout
  * Плавающая кнопка питания по дизайну neon-power-button.html.
  * Полностью нативная отрисовка на Canvas без WebView и фоновых циклов анимации.
  *
- * Базовый размер 64x64 dp, умножается на BUTTON_SCALE = 1.3.
+ * Базовый размер 64x64 dp, умножается на BUTTON_SCALE = 1.15 (кнопка ~74 dp).
+ * Свечение плавно угасает до 0 внутри окна (BadgeCfg.size = 120 dp) без обрезки по краям.
  * Красный цвет (#ff2a3d) при выключении, салатовый неон (#39ff14) при включении.
  */
 class NeonPowerBadgeView @JvmOverloads constructor(
@@ -26,7 +27,7 @@ class NeonPowerBadgeView @JvmOverloads constructor(
 ) : FrameLayout(context, attrs) {
 
     companion object {
-        const val BUTTON_SCALE = 1.3f
+        const val BUTTON_SCALE = 1.15f
         const val BASE_SIZE_DP = 64f
     }
 
@@ -92,18 +93,22 @@ class NeonPowerBadgeView @JvmOverloads constructor(
         if (w <= 0f || h <= 0f) return
 
         val density = resources.displayMetrics.density
-        val s = BUTTON_SCALE * density
+        val k = BUTTON_SCALE * density
 
         val cx = w / 2f
         val cy = h / 2f
-        val r = (BASE_SIZE_DP / 2f) * s // 32 * 1.3 * density = 41.6 * density
+        val r = (BASE_SIZE_DP / 2f) * k // 32 * 1.15 * density = 36.8 * density (~73.6 dp диаметр кнопки)
 
         val isOn = isRunning || ringAlways
         val neonColor = if (isOn) colorGreen else colorRed
 
+        // Запас 2 dp от краев view, чтобы гарантировать отсутствие любых срезов и видимых границ
+        val maxAvailableR = (minOf(w, h) / 2f - 2f * density).coerceAtLeast(r + 1f)
+
         // 1. Halo (мягкое неоновое свечение вокруг кнопки)
-        // box-shadow: 0 0 14px 1px (off, opacity .35) / 0 0 20px 3px (on, opacity .6)
-        val haloSpread = if (isOn) 22f * s else 15f * s
+        // В HTML: box-shadow 0 0 14px 1px (off, opacity .35) / 0 0 20px 3px (on, opacity .6)
+        val haloSpread = if (isOn) 21f * k else 15f * k
+        val haloR = minOf(r + haloSpread, maxAvailableR)
         val haloAlpha = if (isOn) 0.60f else 0.35f
         val haloColorStart = Color.argb(
             (haloAlpha * 255).toInt(),
@@ -111,21 +116,31 @@ class NeonPowerBadgeView @JvmOverloads constructor(
             Color.green(neonColor),
             Color.blue(neonColor)
         )
+
+        // Градиент строго затухает в Color.TRANSPARENT на внешнем крае haloR
         val haloShader = RadialGradient(
-            cx, cy, r + haloSpread,
-            intArrayOf(haloColorStart, haloColorStart.copyAlpha(haloAlpha * 0.5f), Color.TRANSPARENT),
-            floatArrayOf(r / (r + haloSpread), (r + haloSpread * 0.6f) / (r + haloSpread), 1f),
+            cx, cy, haloR,
+            intArrayOf(
+                haloColorStart,
+                haloColorStart.copyAlpha(haloAlpha * 0.35f),
+                Color.TRANSPARENT
+            ),
+            floatArrayOf(
+                (r / haloR).coerceIn(0f, 0.85f),
+                ((r + (haloR - r) * 0.5f) / haloR).coerceIn(0f, 0.95f),
+                1f
+            ),
             Shader.TileMode.CLAMP
         )
         fillPaint.shader = haloShader
-        canvas.drawCircle(cx, cy, r + haloSpread, fillPaint)
+        canvas.drawCircle(cx, cy, haloR, fillPaint)
         fillPaint.shader = null
 
         // 2. Внешняя тень outer: box-shadow 0 6px 12px rgba(0,0,0,.6)
-        val shadowDy = 6f * s
-        val shadowRadius = 12f * s
-        shadowPaint.color = Color.argb(150, 0, 0, 0)
-        shadowPaint.setShadowLayer(shadowRadius, 0f, shadowDy, Color.argb(150, 0, 0, 0))
+        val shadowDy = 4f * k
+        val shadowRadius = minOf(8f * k, maxAvailableR - r - shadowDy).coerceAtLeast(1f)
+        shadowPaint.color = Color.argb(140, 0, 0, 0)
+        shadowPaint.setShadowLayer(shadowRadius, 0f, shadowDy, Color.argb(140, 0, 0, 0))
         canvas.drawCircle(cx, cy, r, shadowPaint)
         shadowPaint.clearShadowLayer()
 
@@ -141,36 +156,36 @@ class NeonPowerBadgeView @JvmOverloads constructor(
         fillPaint.shader = null
 
         // Outer: inset 0 1px 1px rgba(255,255,255,.2) (верхний блик) и inset 0 -2px 1px rgba(255,255,255,.22)
-        strokePaint.strokeWidth = 1f * s
+        strokePaint.strokeWidth = 1f * k
         strokePaint.color = Color.argb(50, 255, 255, 255)
-        canvas.drawCircle(cx, cy, r - 0.5f * s, strokePaint)
+        canvas.drawCircle(cx, cy, r - 0.5f * k, strokePaint)
 
         // 4. Gap (чёрный зазор с тонким неоновым кольцом)
         // inset: 5px
-        val gapR = r - 5f * s
+        val gapR = r - 5f * k
         fillPaint.color = Color.parseColor("#070708")
         canvas.drawCircle(cx, cy, gapR, fillPaint)
 
         // gap shadow: inset 0 2px 4px rgba(0,0,0,.9)
-        strokePaint.strokeWidth = 2f * s
+        strokePaint.strokeWidth = 2f * k
         strokePaint.color = Color.argb(180, 0, 0, 0)
-        canvas.drawCircle(cx, cy - 1f * s, gapR - 1f * s, strokePaint)
+        canvas.drawCircle(cx, cy - 1f * k, gapR - 1f * k, strokePaint)
 
         // gap::after (тонкое неоновое кольцо): inset 1px, border 1px solid var(--c), opacity .3
-        val ringR = gapR - 1.5f * s
-        strokePaint.strokeWidth = 1f * s
+        val ringR = gapR - 1.5f * k
+        strokePaint.strokeWidth = 1f * k
         strokePaint.color = Color.argb(76, Color.red(neonColor), Color.green(neonColor), Color.blue(neonColor))
         canvas.drawCircle(cx, cy, ringR, strokePaint)
 
         // 5. Face (верхняя площадка кнопки)
         // inset: 9px. Если down: scale(.95)
-        val faceBaseR = r - 9f * s
+        val faceBaseR = r - 9f * k
         val faceR = if (pressedLook) faceBaseR * 0.95f else faceBaseR
 
         // 1px чёрная окантовка вокруг face
-        strokePaint.strokeWidth = 1f * s
+        strokePaint.strokeWidth = 1f * k
         strokePaint.color = Color.BLACK
-        canvas.drawCircle(cx, cy, faceR + 0.5f * s, strokePaint)
+        canvas.drawCircle(cx, cy, faceR + 0.5f * k, strokePaint)
 
         // face background: linear-gradient(180deg, #5d5d5f 0%, #2b2b2d 48%, #151517 100%)
         fillPaint.shader = LinearGradient(
@@ -185,19 +200,19 @@ class NeonPowerBadgeView @JvmOverloads constructor(
         // Внутренние тени / блики face
         if (pressedLook) {
             // box-shadow: inset 0 3px 5px rgba(0,0,0,.8)
-            strokePaint.strokeWidth = 3f * s
+            strokePaint.strokeWidth = 3f * k
             strokePaint.color = Color.argb(200, 0, 0, 0)
-            canvas.drawCircle(cx, cy - 1f * s, faceR - 1.5f * s, strokePaint)
+            canvas.drawCircle(cx, cy - 1f * k, faceR - 1.5f * k, strokePaint)
         } else {
             // inset 0 1px 1px rgba(255,255,255,.35), inset 0 -2px 1px rgba(255,255,255,.3)
-            strokePaint.strokeWidth = 1f * s
+            strokePaint.strokeWidth = 1f * k
             strokePaint.color = Color.argb(89, 255, 255, 255)
-            canvas.drawCircle(cx, cy - 0.5f * s, faceR - 0.5f * s, strokePaint)
+            canvas.drawCircle(cx, cy - 0.5f * k, faceR - 0.5f * k, strokePaint)
         }
 
         // 6. Вдавленный диск под значком (face::after)
         // inset: 4px внутри face
-        val diskR = faceR - 4f * s
+        val diskR = faceR - 4f * k
         // radial-gradient(circle at 50% 35%, #2a2a2c 0%, #121214 75%)
         fillPaint.shader = RadialGradient(
             cx, cy - diskR * 0.30f, diskR,
@@ -209,51 +224,53 @@ class NeonPowerBadgeView @JvmOverloads constructor(
         fillPaint.shader = null
 
         // disk inner shadow inset 0 2px 4px rgba(0,0,0,.8)
-        strokePaint.strokeWidth = 2f * s
+        strokePaint.strokeWidth = 2f * k
         strokePaint.color = Color.argb(180, 0, 0, 0)
-        canvas.drawCircle(cx, cy - 1f * s, diskR - 1f * s, strokePaint)
+        canvas.drawCircle(cx, cy - 1f * k, diskR - 1f * k, strokePaint)
 
         // 7. Значок питания (icon)
-        // SVG viewBox 24x24: M12 3v8, M6.3 6.6a8 8 0 1 0 11.4 0
-        // stroke-width: 2.3, stroke-linecap: round
-        // filter: drop-shadow(0 0 2px var(--c)) drop-shadow(0 0 6px var(--c)) (+ 14px on)
-        val iconScale = (24f * s) / 24f // масштаб относительно 24x24
-        val iconStroke = 2.3f * iconScale
+        // Точная геометрия из SVG (viewBox 24x24):
+        // Линия: x = cx, от (cy - 9k) до (cy - 1k)
+        // Дуга: радиус 8k, центр в (cx, cy + 0.213k), startAngle = -135.4f, sweepAngle = -269.2f (разрыв сверху!)
+        val iconStroke = 2.3f * k
 
         powerPath.reset()
         linePath.reset()
 
-        // Вертикальная линия: от (12, 3) до (12, 11)
+        // Вертикальная черта по центру: от cy - 9k до cy - 1k
         val lineX = cx
-        val lineY1 = cy + (3f - 12f) * iconScale
-        val lineY2 = cy + (11f - 12f) * iconScale
+        val lineY1 = cy - 9f * k
+        val lineY2 = cy - 1f * k
         linePath.moveTo(lineX, lineY1)
         linePath.lineTo(lineX, lineY2)
 
-        // Дуга: радиус 8 от (6.3, 6.6) до (17.7, 6.6)
-        val arcR = 8f * iconScale
-        arcBounds.set(cx - arcR, cy - arcR, cx + arcR, cy + arcR)
-        // Углы: дуга с разрывом вверху (от -137 градусов по часовой стрелке 286 градусов)
-        powerPath.arcTo(arcBounds, -137.5f, 275f, false)
+        // Дуга почти полного круга с разрывом строго сверху над вертикальной чертой
+        val arcR = 8f * k
+        val arcCy = cy + 0.213f * k
+        arcBounds.set(cx - arcR, arcCy - arcR, cx + arcR, arcCy + arcR)
+        powerPath.arcTo(arcBounds, -135.4f, -269.2f, false)
 
-        // Свечение значка
+        // Свечение значка (drop-shadow)
         iconGlowPaint.color = neonColor
         iconGlowPaint.strokeWidth = iconStroke
 
         if (isOn) {
-            // drop-shadow 0 0 14px
-            iconGlowPaint.setShadowLayer(14f * density, 0f, 0f, neonColor)
+            // on: drop-shadow 0 0 14px и 7px
+            iconGlowPaint.setShadowLayer(14f * k, 0f, 0f, neonColor)
+            canvas.drawPath(linePath, iconGlowPaint)
+            canvas.drawPath(powerPath, iconGlowPaint)
+            iconGlowPaint.setShadowLayer(7f * k, 0f, 0f, neonColor)
+            canvas.drawPath(linePath, iconGlowPaint)
+            canvas.drawPath(powerPath, iconGlowPaint)
+        } else {
+            // off: drop-shadow 0 0 6px
+            iconGlowPaint.setShadowLayer(6f * k, 0f, 0f, neonColor)
             canvas.drawPath(linePath, iconGlowPaint)
             canvas.drawPath(powerPath, iconGlowPaint)
         }
 
-        // drop-shadow 0 0 6px
-        iconGlowPaint.setShadowLayer(6f * density, 0f, 0f, neonColor)
-        canvas.drawPath(linePath, iconGlowPaint)
-        canvas.drawPath(powerPath, iconGlowPaint)
-
         // drop-shadow 0 0 2px
-        iconGlowPaint.setShadowLayer(2f * density, 0f, 0f, neonColor)
+        iconGlowPaint.setShadowLayer(2f * k, 0f, 0f, neonColor)
         canvas.drawPath(linePath, iconGlowPaint)
         canvas.drawPath(powerPath, iconGlowPaint)
         iconGlowPaint.clearShadowLayer()

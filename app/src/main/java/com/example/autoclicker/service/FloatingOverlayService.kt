@@ -445,9 +445,7 @@ class FloatingOverlayService : Service() {
             onToggle = { active ->
                 if (active) {
                     val res = RunCoordinator.start(applicationContext)
-                    if (res.anyStarted) {
-                        setMode(minimized = true)
-                    } else {
+                    if (!res.anyStarted) {
                         setOn(false, notify = false, animate = true)
                     }
                 } else {
