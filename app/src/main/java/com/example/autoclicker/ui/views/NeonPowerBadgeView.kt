@@ -27,7 +27,7 @@ class NeonPowerBadgeView @JvmOverloads constructor(
 ) : FrameLayout(context, attrs) {
 
     companion object {
-        const val BUTTON_SCALE = 1.15f
+        const val BUTTON_SCALE = 0.95f
         const val BASE_SIZE_DP = 64f
     }
 
@@ -97,7 +97,7 @@ class NeonPowerBadgeView @JvmOverloads constructor(
 
         val cx = w / 2f
         val cy = h / 2f
-        val r = (BASE_SIZE_DP / 2f) * k // 32 * 1.15 * density = 36.8 * density (~73.6 dp диаметр кнопки)
+        val r = (BASE_SIZE_DP / 2f) * k // 32 * 0.95 * density = 30.4 * density (~60.8 dp диаметр кнопки)
 
         val isOn = isRunning || ringAlways
         val neonColor = if (isOn) colorGreen else colorRed
@@ -106,8 +106,7 @@ class NeonPowerBadgeView @JvmOverloads constructor(
         val maxAvailableR = (minOf(w, h) / 2f - 2f * density).coerceAtLeast(r + 1f)
 
         // 1. Halo (мягкое неоновое свечение вокруг кнопки)
-        // В HTML: box-shadow 0 0 14px 1px (off, opacity .35) / 0 0 20px 3px (on, opacity .6)
-        val haloSpread = if (isOn) 21f * k else 15f * k
+        val haloSpread = if (isOn) 18f * k else 13f * k
         val haloR = minOf(r + haloSpread, maxAvailableR)
         val haloAlpha = if (isOn) 0.60f else 0.35f
         val haloColorStart = Color.argb(

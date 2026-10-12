@@ -205,7 +205,6 @@ class NeonSwitchSliderView @JvmOverloads constructor(
         canvas.translate(ox, oy)
 
         val visualOn = currentKnobOffset > maxTravel / 2f
-        val activeNeonColor = if (visualOn) colorGreen else colorRed
 
         // 1. Корпус (bezel)
         bezelRect.set(0f, 0f, totalW, totalH)
@@ -235,55 +234,13 @@ class NeonSwitchSliderView @JvmOverloads constructor(
             bezelR - 0.5f * s, bezelR - 0.5f * s, strokePaint
         )
 
-        // 2. Неоновая кайма (glow и rim)
-        // Красная левая половина (0-28% opaque, до 62% transparent)
-        // Салатовая правая половина (270deg: справа 0-28% opaque, до 62% transparent)
-        val redGlowAlpha = if (visualOn) 0f else 0.70f
-        val redRimAlpha = if (visualOn) 0.12f else 1.0f
-        val greenGlowAlpha = if (visualOn) 0.70f else 0f
-        val greenRimAlpha = if (visualOn) 1.0f else 0.12f
-
-        glowRect.set(1.5f * s, 1.5f * s, totalW - 1.5f * s, totalH - 1.5f * s)
-        val glowR = glowRect.height() / 2f
+        // 2. Нейтральная кайма корпуса (без цветного свечения)
         rimRect.set(2.5f * s, 2.5f * s, totalW - 2.5f * s, totalH - 2.5f * s)
         val rimR = rimRect.height() / 2f
-
-        // Glow red (левая сторона)
-        if (redGlowAlpha > 0f) {
-            glowPaint.color = Color.argb((redGlowAlpha * 255).toInt(), 255, 42, 61)
-            glowPaint.setShadowLayer(5f * s, 0f, 0f, glowPaint.color)
-            canvas.drawRoundRect(glowRect, glowR, glowR, glowPaint)
-            glowPaint.clearShadowLayer()
-        }
-        // Glow green (правая сторона)
-        if (greenGlowAlpha > 0f) {
-            glowPaint.color = Color.argb((greenGlowAlpha * 255).toInt(), 57, 255, 20)
-            glowPaint.setShadowLayer(5f * s, 0f, 0f, glowPaint.color)
-            canvas.drawRoundRect(glowRect, glowR, glowR, glowPaint)
-            glowPaint.clearShadowLayer()
-        }
-
-        // Rim red (градиент маски слева направо: 0..28% цвет, до 62% прозрачно)
-        strokePaint.strokeWidth = 1.5f * s
-        val redColor = Color.argb((redRimAlpha * 255).toInt(), 255, 42, 61)
-        strokePaint.shader = LinearGradient(
-            0f, 0f, totalW, 0f,
-            intArrayOf(redColor, redColor, Color.TRANSPARENT, Color.TRANSPARENT),
-            floatArrayOf(0f, 0.28f, 0.62f, 1f),
-            Shader.TileMode.CLAMP
-        )
-        canvas.drawRoundRect(rimRect, rimR, rimR, strokePaint)
-
-        // Rim green (градиент справа налево: 100%..72% цвет, до 38% прозрачно)
-        val greenColor = Color.argb((greenRimAlpha * 255).toInt(), 57, 255, 20)
-        strokePaint.shader = LinearGradient(
-            0f, 0f, totalW, 0f,
-            intArrayOf(Color.TRANSPARENT, Color.TRANSPARENT, greenColor, greenColor),
-            floatArrayOf(0f, 0.38f, 0.72f, 1f),
-            Shader.TileMode.CLAMP
-        )
-        canvas.drawRoundRect(rimRect, rimR, rimR, strokePaint)
+        strokePaint.strokeWidth = 1f * s
         strokePaint.shader = null
+        strokePaint.color = Color.argb(30, 255, 255, 255)
+        canvas.drawRoundRect(rimRect, rimR, rimR, strokePaint)
 
         // 3. Тёмная панель внутри (panel): inset 3.5px
         panelRect.set(3.5f * s, 3.5f * s, totalW - 3.5f * s, totalH - 3.5f * s)
@@ -377,12 +334,6 @@ class NeonSwitchSliderView @JvmOverloads constructor(
         canvas.drawCircle(kcx, kcy, knobR, shadowPaint)
         shadowPaint.clearShadowLayer()
 
-        // Неоновое свечение ручки: 0 0 7px var(--c)
-        glowPaint.color = activeNeonColor
-        glowPaint.setShadowLayer(7f * s, 0f, 0f, activeNeonColor)
-        canvas.drawCircle(kcx, kcy, knobR, glowPaint)
-        glowPaint.clearShadowLayer()
-
         // Тело стекла ручки (замена backdrop-filter: blur(1px) saturate(1.4))
         fillPaint.color = Color.argb(120, 20, 22, 32)
         canvas.drawCircle(kcx, kcy, knobR, fillPaint)
@@ -424,9 +375,9 @@ class NeonSwitchSliderView @JvmOverloads constructor(
         canvas.drawCircle(kcx, kcy, knobR * 0.65f, strokePaint)
         strokePaint.shader = null
 
-        // Внутреннее неоновое свечение ручки: inset 0 0 9px -1px var(--c)
-        strokePaint.strokeWidth = 3f * s
-        strokePaint.color = Color.argb(120, Color.red(activeNeonColor), Color.green(activeNeonColor), Color.blue(activeNeonColor))
+        // Внутренний нейтральный блик ручки
+        strokePaint.strokeWidth = 2f * s
+        strokePaint.color = Color.argb(40, 255, 255, 255)
         canvas.drawCircle(kcx, kcy, knobR - 1.5f * s, strokePaint)
 
         // Внутренний нижний блик: inset 0 -2px 4px rgba(255,255,255,.12)
