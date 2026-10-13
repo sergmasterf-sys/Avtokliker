@@ -48,6 +48,7 @@ class AutoClickForegroundService : Service() {
         createNotificationChannel()
         startForegroundWithNotification("Готов к работе")
         observeStatus()
+        AccessibilityWatchdog.start(applicationContext, serviceScope)
         EventLogManager.log(EventLogManager.TAG_AUTO_CLICKER, "ForegroundService создан")
     }
 

@@ -25,6 +25,9 @@ class AutoClickerApp : Application() {
         com.example.autoclicker.data.SmartLearnedStore.init(this)
         EventLogManager.log(EventLogManager.TAG_SYSTEM, "Application.onCreate")
 
+        // 0. Если выдан WRITE_SECURE_SETTINGS, сразу включаем службу доступности (если система её выключила)
+        com.example.autoclicker.service.AccessibilityWatchdog.enableNow(this)
+
         // 1. Очистка старых временных файлов и скриншотов в cacheDir
         cleanupCacheDir()
 

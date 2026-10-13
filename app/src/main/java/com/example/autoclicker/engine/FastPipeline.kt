@@ -42,6 +42,16 @@ class FastPipeline(
         // Сколько проб должно совпасть
         const val REQUIRED_GRID = 7
         const val REQUIRED_EDGE = 5
+
+        // Подтверждение нажатий (слабый интернет / медленный планшет)
+        const val START_RETRY_MS = 800L           // пауза перед повтором тапа по start
+        const val CONTINUE_RETRY_MS = 700L        // пауза перед повтором тапа по continue
+        const val CONFIRM_GONE_FRAMES = 2         // кнопка должна пропасть на N кадрах подряд
+        const val CONTINUE_CONFIRM_FRAMES = 2     // continue должен быть виден N кадров подряд до тапа
+        const val CALIBRATION_CONFIRM_FRAMES = 2  // кандидат калибровки должен повториться N кадров
+        const val MAX_CONTINUE_TAPS = 5           // тапов без реакции до отбраковки отпечатка
+        const val FRESH_CONTINUE_TAPS = 2         // то же для только что откалиброванного отпечатка
+        const val CONTINUE_BLOCK_MS = 10_000L     // пауза continue после отбраковки
     }
 
     enum class State {
@@ -135,6 +145,48 @@ class FastPipeline(
                 val array = JSONArray()
                 trimmed.forEach { array.put(serializeJson(it)) }
                 prefs.edit().putString("${fp.screenW}x${fp.screenH}:continue_list", array.toString()).apply()
+            }
+        }
+
+        fun removeContinue(fp: ButtonFingerprint) {
+            val remaining = getContinues(fp.screenW, fp.screenH).filter { it.id != fp.id }
+            val array = JSONArray()
+            remaining.forEach { array.put(serializeJson(it)) }
+            prefs.edit().putString("${fp.screenW}x${fp.screenH}:continue_list", array.toString()).apply()
+        }
+
+        /** Запомнить «ложную» точку continue (например, кнопка в матче), чтобы больше не калибровать по ней. */
+        fun addRejected(screenW: Int, screenH: Int, xFrac: Float, yFrac: Float) {
+            val key = "${screenW}x${screenH}:rejected"
+            val array = try {
+                JSONArray(prefs.getString(key, null) ?: "[]")
+            } catch (_: Exception) {
+                JSONArray()
+            }
+            val item = JSONArray()
+            item.put(xFrac.toDouble())
+            item.put(yFrac.toDouble())
+            array.put(item)
+            // Хранить не больше 20 точек: самые старые выпадают
+            val trimmed = JSONArray()
+            val from = (array.length() - 20).coerceAtLeast(0)
+            for (i in from until array.length()) trimmed.put(array.get(i))
+            prefs.edit().putString(key, trimmed.toString()).apply()
+        }
+
+        fun isRejected(screenW: Int, screenH: Int, xFrac: Float, yFrac: Float): Boolean {
+            val raw = prefs.getString("${screenW}x${screenH}:rejected", null) ?: return false
+            return try {
+                val array = JSONArray(raw)
+                for (i in 0 until array.length()) {
+                    val item = array.getJSONArray(i)
+                    val dx = (xFrac - item.getDouble(0)) * screenW
+                    val dy = (yFrac - item.getDouble(1)) * screenH
+                    if (hypot(dx, dy) < 60.0) return true
+                }
+                false
+            } catch (_: Exception) {
+                false
             }
         }
 
@@ -239,6 +291,22 @@ class FastPipeline(
     private var inMatchFrame = 0
     private var lastStartTapMs = 0L
 
+    // Подтверждение нажатий
+    private var startPending = false
+    private var startTapCount = 0
+    private var startGoneFrames = 0
+
+    private var continuePending = false
+    private var continueTapCount = 0
+    private var continueLastTapMs = 0L
+    private var continueGoneFrames = 0
+    private var continueSeenFrames = 0
+    private var continueBlockedUntilMs = 0L
+    private var freshContinueId: String? = null
+
+    private var pendingCalib: ButtonFingerprint? = null
+    private var pendingCalibFrames = 0
+
     // Кэш всех отпечатков continue (изученные + встроенные seed), сбрасывается при сохранении
     private var cachedAllContinues: List<ButtonFingerprint>? = null
     private var cachedAllContinuesKey = 0L
@@ -260,6 +328,7 @@ class FastPipeline(
         if (state != newState) {
             EventLogManager.log(EventLogManager.TAG_AUTO_CLICKER, "FAST: $state -> $newState")
             state = newState
+            resetTapTracking()
             when (newState) {
                 State.UNKNOWN -> onActionUpdate("Определение экрана...", "Поиск кнопок", null)
                 State.LOBBY -> onActionUpdate("В лобби: ожидание старта", "Поиск кнопки НАЧАТЬ", null)
@@ -415,25 +484,27 @@ class FastPipeline(
             return
         }
 
-        // Экран результатов (изученные и встроенные seed-отпечатки continue)
+        // Экран результатов (изученные и встроенные seed-отпечатки continue): тап только после подтверждения в RESULT
         if (findContinueHit(bitmap, sW, sH) != null) {
             transitionTo(State.RESULT)
+            continueSeenFrames = 1
             return
         }
 
-        // Отпечатков нет или не совпали: калибровка по цвету
+        // Калибровка start: кандидат должен подтвердиться на двух кадрах подряд
         if (startFp == null) {
-            val calibStart = calibrateColor(bitmap, sW, sH, "start", START_ROI, ButtonKind.YELLOW)
-            if (calibStart != null) {
-                fingerprintStore.saveStart(calibStart)
+            val cand = calibrateColor(bitmap, sW, sH, "start", START_ROI, ButtonKind.YELLOW)
+            val confirmed = confirmCalibration(cand)
+            if (confirmed != null) {
+                fingerprintStore.saveStart(confirmed)
                 transitionTo(State.LOBBY)
                 return
             }
+            if (cand != null) return // ждём подтверждения на следующем кадре
         }
 
-        val calibCont = calibrateContinue(bitmap, sW, sH)
-        if (calibCont != null) {
-            saveContinueFp(calibCont)
+        // Кандидат continue: не запоминаем и не тапаем здесь, проверка с подтверждением в RESULT
+        if (calibrateContinue(bitmap, sW, sH) != null) {
             transitionTo(State.RESULT)
             return
         }
@@ -450,30 +521,44 @@ class FastPipeline(
         shotStart: Long
     ) {
         val startFp = fingerprintStore.getStart(sW, sH)
+        val now = System.currentTimeMillis()
         if (startFp != null) {
             val matched = verifyFingerprint(bitmap, startFp)
             if (matched >= REQUIRED_GRID) {
                 lobbyStartMissCount = 0
-                val tapX = startFp.xFrac * sW
-                val tapY = startFp.yFrac * sH
-                val timeMs = System.currentTimeMillis() - shotStart
-                EventLogManager.log(
-                    EventLogManager.TAG_AUTO_CLICKER,
-                    "FAST: тап start ${tapX.toInt()},${tapY.toInt()} проб $matched/${startFp.samples.size} источник=отпечаток снимок->тап ${timeMs}мс"
-                )
-                onActionUpdate("Нажатие: НАЧАТЬ", "Переход в матч", "НАЖАТИЕ: start (${tapX.toInt()}, ${tapY.toInt()})")
-                performSafeTap(tapX, tapY)
-                lastStartTapMs = System.currentTimeMillis()
-                onCycleIncrement()
-                transitionTo(State.IN_MATCH)
+                startGoneFrames = 0
+                if (startPending) {
+                    // Кнопка всё ещё на экране после тапа: ждём реакции игры
+                    // (слабый интернет / планшет «не проснулся»), потом повторяем.
+                    val retryDelay = if (startTapCount >= 4) START_RETRY_MS * 2 else START_RETRY_MS
+                    if (now - lastStartTapMs < retryDelay) return
+                    EventLogManager.log(
+                        EventLogManager.TAG_AUTO_CLICKER,
+                        "FAST: start всё ещё виден через ${now - lastStartTapMs}мс после тапа -> повтор",
+                        isError = startTapCount >= 3
+                    )
+                }
+                tapStart(startFp.xFrac * sW, startFp.yFrac * sH, "$matched/${startFp.samples.size}", "отпечаток", shotStart)
                 return
             } else {
-                // Если вместо лобби уже экран результатов, нажимаем продолжить
-                val hit = findContinueHit(bitmap, sW, sH)
-                if (hit != null) {
+                if (startPending) {
+                    // Кнопка не видна: нажатие успешно только после 2 кадров подряд
+                    startGoneFrames++
+                    if (startGoneFrames >= CONFIRM_GONE_FRAMES) {
+                        EventLogManager.log(
+                            EventLogManager.TAG_AUTO_CLICKER,
+                            "FAST: start подтверждён: кнопка исчезла после $startTapCount тап(ов)"
+                        )
+                        onCycleIncrement()
+                        transitionTo(State.IN_MATCH)
+                    }
+                    return
+                }
+
+                // Если вместо лобби уже экран результатов: переходим в RESULT, тап там после подтверждения
+                if (findContinueHit(bitmap, sW, sH) != null) {
                     transitionTo(State.RESULT)
-                    val src = if (hit.fp.id.startsWith("seed_")) "seed" else "отпечаток"
-                    tapContinueAt(hit.fp, "${hit.matched}/${hit.fp.samples.size}", src, sW, sH, shotStart)
+                    continueSeenFrames = 1
                     return
                 }
 
@@ -497,24 +582,17 @@ class FastPipeline(
                 }
             }
         } else {
-            // Отпечатка start нет: калибровка на каждом кадре
-            val calib = calibrateColor(bitmap, sW, sH, "start", START_ROI, ButtonKind.YELLOW)
-            if (calib != null) {
-                fingerprintStore.saveStart(calib)
-                val tapX = calib.xFrac * sW
-                val tapY = calib.yFrac * sH
-                val timeMs = System.currentTimeMillis() - shotStart
-                EventLogManager.log(
-                    EventLogManager.TAG_AUTO_CLICKER,
-                    "FAST: тап start ${tapX.toInt()},${tapY.toInt()} проб ${calib.samples.size}/${calib.samples.size} источник=калибровка_цвет снимок->тап ${timeMs}мс"
-                )
-                onActionUpdate("Нажатие: НАЧАТЬ", "Переход в матч", "НАЖАТИЕ: start (${tapX.toInt()}, ${tapY.toInt()})")
-                performSafeTap(tapX, tapY)
-                lastStartTapMs = System.currentTimeMillis()
-                onCycleIncrement()
-                transitionTo(State.IN_MATCH)
+            // Отпечатка start нет: калибровка с подтверждением на 2 кадрах
+            val cand = calibrateColor(bitmap, sW, sH, "start", START_ROI, ButtonKind.YELLOW)
+            val confirmed = confirmCalibration(cand)
+            if (confirmed != null) {
+                fingerprintStore.saveStart(confirmed)
+                tapStart(confirmed.xFrac * sW, confirmed.yFrac * sH, "${confirmed.samples.size}/${confirmed.samples.size}", "калибровка_цвет", shotStart)
                 return
-            } else if (templateFallback != null) {
+            }
+            if (cand != null) return
+
+            if (templateFallback != null) {
                 // Запасной вариант: поиск по шаблону только при калибровке
                 val rule = config.rules.firstOrNull { it.id == "start" }
                 if (rule != null) {
@@ -523,10 +601,7 @@ class FastPipeline(
                         val (clickX, clickY) = fallbackCoords
                         val fp = buildFingerprint(bitmap, "start", clickX, clickY, (sW * 0.18f).toInt(), (sH * 0.08f).toInt(), ButtonKind.YELLOW)
                         fingerprintStore.saveStart(fp)
-                        performSafeTap(clickX, clickY)
-                        lastStartTapMs = System.currentTimeMillis()
-                        onCycleIncrement()
-                        transitionTo(State.IN_MATCH)
+                        tapStart(clickX, clickY, "${fp.samples.size}/${fp.samples.size}", "шаблон", shotStart)
                         return
                     }
                 }
@@ -541,23 +616,20 @@ class FastPipeline(
         config: EffectiveConfig,
         shotStart: Long
     ) {
-        // В матче тапов НЕ делаем. Проверяем только кнопки continue (изученные + seed)
+        // В матче тапов НЕ делаем. При появлении continue переходим в RESULT без тапа:
+        // тап там только после подтверждения на нескольких кадрах.
         val hit = findContinueHit(bitmap, sW, sH)
         if (hit != null) {
             transitionTo(State.RESULT)
-            val src = if (hit.fp.id.startsWith("seed_")) "seed" else "отпечаток"
-            tapContinueAt(hit.fp, "${hit.matched}/${hit.fp.samples.size}", src, sW, sH, shotStart)
+            continueSeenFrames = 1
             return
         }
 
         inMatchFrame++
         if (inMatchFrame % 3 == 0) {
-            // Каждый 3-й кадр: калибровка по цвету в маленьком ROI в правом нижнем углу
-            val calib = calibrateContinue(bitmap, sW, sH)
-            if (calib != null) {
-                saveContinueFp(calib)
+            // Каждый 3-й кадр: есть ли кандидат continue в правом нижнем углу (без запоминания и без тапа)
+            if (calibrateContinue(bitmap, sW, sH) != null) {
                 transitionTo(State.RESULT)
-                tapContinueAt(calib, "${calib.samples.size}/${calib.samples.size}", "цвет", sW, sH, shotStart)
                 return
             }
 
@@ -586,22 +658,78 @@ class FastPipeline(
         config: EffectiveConfig,
         shotStart: Long
     ) {
-        // Пока виден любой continue, нажимаем его
-        val hit = findContinueHit(bitmap, sW, sH)
-        if (hit != null) {
-            val src = if (hit.fp.id.startsWith("seed_")) "seed" else "отпечаток"
-            tapContinueAt(hit.fp, "${hit.matched}/${hit.fp.samples.size}", src, sW, sH, shotStart)
-            delay(250L) // после каждого тапа ждать 250 мс и сразу следующий снимок
-            return
-        }
+        val now = System.currentTimeMillis()
 
-        // Новая позиция/цвет кнопки: калибровка по цвету
-        val calib = calibrateContinue(bitmap, sW, sH)
-        if (calib != null) {
-            saveContinueFp(calib)
-            tapContinueAt(calib, "${calib.samples.size}/${calib.samples.size}", "цвет", sW, sH, shotStart)
-            delay(250L)
-            return
+        if (now >= continueBlockedUntilMs) {
+            val hit = findContinueHit(bitmap, sW, sH)
+            if (hit != null) {
+                resultMissFrames = 0
+                continueGoneFrames = 0
+                lastResultActionMs = now
+                continueSeenFrames++
+                // Тапаем только если кнопка видна на 2 кадрах подряд
+                if (continueSeenFrames < CONTINUE_CONFIRM_FRAMES) return
+                // После тапа даём игре время отреагировать (слабый интернет)
+                if (continuePending && now - continueLastTapMs < CONTINUE_RETRY_MS) return
+
+                val isSeed = hit.fp.id.startsWith("seed_")
+                val limit = if (hit.fp.id == freshContinueId) FRESH_CONTINUE_TAPS else MAX_CONTINUE_TAPS
+                if (continueTapCount >= limit) {
+                    EventLogManager.log(
+                        EventLogManager.TAG_AUTO_CLICKER,
+                        "FAST: continue ${hit.fp.id} не исчезает после $continueTapCount тапов — " +
+                            (if (isSeed) "пауза" else "отпечаток удалён (похоже на ложный), пауза") +
+                            " ${CONTINUE_BLOCK_MS / 1000}с",
+                        isError = true
+                    )
+                    if (!isSeed) {
+                        fingerprintStore.removeContinue(hit.fp)
+                        fingerprintStore.addRejected(sW, sH, hit.fp.xFrac, hit.fp.yFrac)
+                        cachedAllContinues = null
+                    }
+                    freshContinueId = null
+                    continueBlockedUntilMs = now + CONTINUE_BLOCK_MS
+                    continuePending = false
+                    continueTapCount = 0
+                    continueSeenFrames = 0
+                    return
+                }
+                val src = if (isSeed) "seed" else "отпечаток"
+                tapContinueAt(hit.fp, "${hit.matched}/${hit.fp.samples.size}", src, sW, sH, shotStart)
+                return
+            }
+
+            if (continuePending) {
+                // Кнопка пропала: подтверждаем после 2 кадров подряд
+                continueGoneFrames++
+                if (continueGoneFrames >= CONFIRM_GONE_FRAMES) {
+                    EventLogManager.log(
+                        EventLogManager.TAG_AUTO_CLICKER,
+                        "FAST: continue подтверждён: кнопка исчезла после $continueTapCount тап(ов)"
+                    )
+                    continuePending = false
+                    continueTapCount = 0
+                    continueGoneFrames = 0
+                    continueSeenFrames = 0
+                    freshContinueId = null
+                    lastResultActionMs = now
+                }
+                return
+            }
+
+            // Новая позиция/цвет кнопки: калибровка по цвету с подтверждением на 2 кадрах
+            val cand = calibrateContinue(bitmap, sW, sH)
+            val confirmed = confirmCalibration(cand)
+            if (confirmed != null) {
+                saveContinueFp(confirmed)
+                freshContinueId = confirmed.id
+                tapContinueAt(confirmed, "${confirmed.samples.size}/${confirmed.samples.size}", "цвет", sW, sH, shotStart)
+                return
+            }
+            if (cand != null) {
+                lastResultActionMs = now
+                return
+            }
         }
 
         resultMissFrames++
@@ -646,6 +774,22 @@ class FastPipeline(
         return best
     }
 
+    /** Нажатие «НАЧАТЬ»: подтверждение (кнопка исчезла) выполняется в handleLobbyState. */
+    private suspend fun tapStart(x: Float, y: Float, probes: String, source: String, shotStart: Long) {
+        val now = System.currentTimeMillis()
+        startTapCount++
+        startPending = true
+        startGoneFrames = 0
+        EventLogManager.log(
+            EventLogManager.TAG_AUTO_CLICKER,
+            "FAST: тап start ${x.toInt()},${y.toInt()} проб $probes попытка $startTapCount источник=$source снимок->тап ${now - shotStart}мс"
+        )
+        onActionUpdate("Нажатие: НАЧАТЬ", "Проверка: кнопка должна исчезнуть", "НАЖАТИЕ: start (${x.toInt()}, ${y.toInt()})")
+        performSafeTap(x, y)
+        lastStartTapMs = System.currentTimeMillis()
+    }
+
+    /** Нажатие «ПРОДОЛЖИТЬ»: подтверждение (кнопка исчезла) выполняется в handleResultState. */
     private suspend fun tapContinueAt(
         fp: ButtonFingerprint,
         probes: String,
@@ -656,20 +800,69 @@ class FastPipeline(
     ) {
         val tapX = fp.xFrac * sW
         val tapY = fp.yFrac * sH
-        val timeMs = System.currentTimeMillis() - shotStart
+        val now = System.currentTimeMillis()
+        continueTapCount++
+        continuePending = true
+        continueGoneFrames = 0
+        continueLastTapMs = now
         EventLogManager.log(
             EventLogManager.TAG_AUTO_CLICKER,
-            "FAST: тап continue ${tapX.toInt()},${tapY.toInt()} проб $probes источник=$source снимок->тап ${timeMs}мс"
+            "FAST: тап continue ${tapX.toInt()},${tapY.toInt()} проб $probes попытка $continueTapCount источник=$source снимок->тап ${now - shotStart}мс"
         )
-        onActionUpdate("Нажатие: ПРОДОЛЖИТЬ", "Экран результатов", "НАЖАТИЕ: continue (${tapX.toInt()}, ${tapY.toInt()})")
+        onActionUpdate("Нажатие: ПРОДОЛЖИТЬ", "Проверка: кнопка должна исчезнуть", "НАЖАТИЕ: continue (${tapX.toInt()}, ${tapY.toInt()})")
         performSafeTap(tapX, tapY)
         lastResultActionMs = System.currentTimeMillis()
         resultMissFrames = 0
     }
 
+    /**
+     * Подтверждение калибровки: кандидат должен повториться в той же точке
+     * на CALIBRATION_CONFIRM_FRAMES кадрах подряд, иначе его не запоминаем и не тапаем.
+     */
+    private fun confirmCalibration(candidate: ButtonFingerprint?): ButtonFingerprint? {
+        if (candidate == null) {
+            pendingCalib = null
+            pendingCalibFrames = 0
+            return null
+        }
+        val prev = pendingCalib
+        val sameSpot = prev != null && prev.ruleId == candidate.ruleId &&
+            hypot(
+                ((candidate.xFrac - prev.xFrac) * candidate.screenW).toDouble(),
+                ((candidate.yFrac - prev.yFrac) * candidate.screenH).toDouble()
+            ) < 40.0
+        if (sameSpot) {
+            pendingCalibFrames++
+        } else {
+            pendingCalib = candidate
+            pendingCalibFrames = 1
+        }
+        return if (pendingCalibFrames >= CALIBRATION_CONFIRM_FRAMES) {
+            pendingCalib = null
+            pendingCalibFrames = 0
+            candidate
+        } else null
+    }
+
+    private fun resetTapTracking() {
+        startPending = false
+        startTapCount = 0
+        startGoneFrames = 0
+        continuePending = false
+        continueTapCount = 0
+        continueGoneFrames = 0
+        continueSeenFrames = 0
+        pendingCalib = null
+        pendingCalibFrames = 0
+    }
+
     private fun calibrateContinue(bitmap: Bitmap, sW: Int, sH: Int): ButtonFingerprint? {
-        return calibrateColor(bitmap, sW, sH, "continue_blue", CONTINUE_ROI, ButtonKind.BLUE)
+        val cand = calibrateColor(bitmap, sW, sH, "continue_blue", CONTINUE_ROI, ButtonKind.BLUE)
             ?: calibrateColor(bitmap, sW, sH, "continue_mvp", CONTINUE_ROI, ButtonKind.YELLOW)
+            ?: return null
+        // Точки, которые уже оказались ложными (тап не убрал «кнопку»), больше не берём
+        if (fingerprintStore.isRejected(sW, sH, cand.xFrac, cand.yFrac)) return null
+        return cand
     }
 
     private fun saveContinueFp(fp: ButtonFingerprint) {
