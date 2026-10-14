@@ -63,6 +63,10 @@ class FastPipeline(
         const val IN_MATCH_START_RECHECK_MS = 10_000L // не искать start в матче первые 10 с после тапа
         const val IN_MATCH_ARMED_INTERVAL_MS = 350L
         const val IN_MATCH_IDLE_INTERVAL_MS = 1200L
+        const val SCORE_CONFLICT_INTERVAL_MS = 350L   // счёт расходится с хранимым: читаем чаще, чтобы быстро исправить
+        const val SCORE_READ_PERIOD_MS = 900L
+        const val SCORE_CONFLICT_READ_PERIOD_MS = 300L
+        const val AD_SKIP_AFTER_START_TAP_MS = 4000L  // сразу после тапа «Начать» рекламу не ищем
 
         // Проверка, что тап по start реально запустил подбор
         const val START_GONE_YELLOW_MAX = 0.12f   // на месте кнопки жёлтого должно стать меньше 12%
@@ -349,6 +353,13 @@ class FastPipeline(
     // Чтение счёта по цифрам и «ворота конца матча»
     private val scoreReader = ScoreReader()
     private val endgameGate = EndgameGate()
+    private var lastResyncLogged = 0
+
+    // Закрытие рекламы (крестик в правом верхнем углу) перед нажатием «Начать»
+    private val adCloser = AdCloser(
+        tap = { x, y -> performSafeTap(x, y) },
+        onAction = { current, next -> onActionUpdate(current, next, null) }
+    )
     private var scoreOcrFailures = 0
     private var scoreOcrDisabledUntilMs = 0L
     private val scoreOcrDisabled: Boolean
@@ -382,6 +393,7 @@ class FastPipeline(
             EventLogManager.log(EventLogManager.TAG_AUTO_CLICKER, "FAST: $state -> $newState")
             state = newState
             resetTapTracking()
+            adCloser.reset()
             when (newState) {
                 State.UNKNOWN -> onActionUpdate("Определение экрана...", "Поиск кнопок", null)
                 State.WAITING -> {
@@ -434,7 +446,11 @@ class FastPipeline(
             // LOBBY: опрос каждые ~350 мс
             // RESULT: опрос каждые ~300-350 мс
             val interval = when (state) {
-                State.IN_MATCH -> if (endgameGate.isArmed) IN_MATCH_ARMED_INTERVAL_MS else IN_MATCH_IDLE_INTERVAL_MS
+                State.IN_MATCH -> when {
+                    endgameGate.isArmed -> IN_MATCH_ARMED_INTERVAL_MS
+                    scoreReader.tracker.hasPendingConflict -> SCORE_CONFLICT_INTERVAL_MS
+                    else -> IN_MATCH_IDLE_INTERVAL_MS
+                }
                 State.LOBBY -> 350L
                 State.RESULT -> 350L
                 State.UNKNOWN -> 350L
@@ -532,6 +548,14 @@ class FastPipeline(
         config: EffectiveConfig,
         shotStart: Long
     ) {
+        // Реклама поверх лобби (в т.ч. несколько подряд): сначала закрываем её крестиком.
+        // В матче и на экране результатов не ищем, чтобы не принять игровой значок за крестик.
+        if ((state == State.UNKNOWN || state == State.WAITING || state == State.LOBBY) &&
+            System.currentTimeMillis() - lastStartTapMs > AD_SKIP_AFTER_START_TAP_MS
+        ) {
+            if (adCloser.step(bitmap, sW, sH)) return
+        }
+
         when (state) {
             State.UNKNOWN -> handleUnknownState(bitmap, sW, sH, config, shotStart)
             State.WAITING -> handleWaitingState(bitmap, sW, sH, config, shotStart)
@@ -971,6 +995,14 @@ class FastPipeline(
         return try {
             val s = scoreReader.read(bitmap)
             scoreOcrFailures = 0
+            val tr = scoreReader.tracker
+            if (tr.resyncCount != lastResyncLogged) {
+                lastResyncLogged = tr.resyncCount
+                EventLogManager.log(
+                    EventLogManager.TAG_AUTO_CLICKER,
+                    "SCORE: счёт сам исправлен (${tr.lastResyncInfo}), всего исправлений: ${tr.resyncCount}"
+                )
+            }
             val isDebug = settingsRepository.getLatestSettings().isDebugScreenshots
             if (isDebug) {
                 scoreReader.maybeSaveDebugCrop(
@@ -1082,7 +1114,8 @@ class FastPipeline(
         val prevMode = endgameGate.mode
 
         // Опрос OCR раз в ~1 с
-        if (now - lastScoreReadMs < 900L) {
+        val readPeriod = if (scoreReader.tracker.hasPendingConflict) SCORE_CONFLICT_READ_PERIOD_MS else SCORE_READ_PERIOD_MS
+        if (now - lastScoreReadMs < readPeriod) {
             endgameGate.onTimeTick(now)
             checkEndgameModeTransition(prevMode, now)
             return
