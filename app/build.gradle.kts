@@ -71,6 +71,7 @@ dependencies {
   implementation(libs.androidx.lifecycle.viewmodel.compose)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
+  implementation(libs.mlkit.text.recognition)
 
   testImplementation(libs.junit)
   testImplementation(libs.kotlinx.coroutines.test)

@@ -352,6 +352,37 @@ object ColorBlobFinder {
     }
 
     /**
+     * Строгий поиск большой жёлтой кнопки «НАЧАТЬ» в лобби.
+     * Размеры считаются от ВЫСОТЫ экрана (интерфейс игры растёт вместе с высотой), поэтому
+     * работает на любых соотношениях сторон. Мелкие жёлтые значки (молния, флажок, цифры)
+     * и длинные жёлтые полосы-тикеры сюда не проходят.
+     * Эталон 1340x800: кнопка ~252x94 px (0.31 x 0.12 высоты).
+     */
+    fun findStartButton(
+        pixels: IntArray,
+        width: Int,
+        height: Int,
+        step: Int = 2,
+        screenW: Int,
+        screenH: Int
+    ): Result {
+        return findBlobs(
+            pixels = pixels,
+            width = width,
+            height = height,
+            step = step,
+            minAllowedW = (screenH * 0.18f).toInt(),
+            maxAllowedW = (screenH * 0.55f).toInt(),
+            minAllowedH = (screenH * 0.07f).toInt(),
+            maxAllowedH = (screenH * 0.20f).toInt(),
+            minAspect = 1.8f,
+            maxAspect = 4.5f,
+            minDensity = 0.5f,
+            isColor = ::isYellowHsv
+        )
+    }
+
+    /**
      * Поиск синей кнопки "ПРОДОЛЖИТЬ" по относительным размерам экрана.
      */
     fun findBlueButton(
