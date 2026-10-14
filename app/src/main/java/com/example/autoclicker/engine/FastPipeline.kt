@@ -54,14 +54,11 @@ class FastPipeline(
         const val CONTINUE_BLOCK_MS = 10_000L     // пауза continue после отбраковки
 
         // Ворота конца матча: «Продолжить» ищем только когда счёт близок к цели
-        const val DEFAULT_TARGET = 40             // цель по умолчанию, если «Цель: N» не прочиталась
-        const val ARM_MARGIN = 3                  // искать continue при счёте >= цель - 3 (37 из 40)
-        const val ARM_CONFIRM_READS = 2           // высокий счёт должен прочитаться 2 раза подряд
-        const val BANNER_GONE_READS = 3           // панель счёта пропала на N чтениях подряд = матч кончился
-        const val NO_SCORE_FALLBACK_MS = 4 * 60_000L // счёт ни разу не прочитался: через 4 мин всё равно искать
-        const val MATCH_MAX_MS = 12 * 60_000L     // страховка: матч не длится дольше
-        const val OCR_FAIL_LIMIT = 4              // столько сбоев OCR подряд, и защита по счёту отключается
-        const val WAITING_FALLBACK_MS = 90_000L   // ожидание без единого признака -> считаем что матч
+        const val DEFAULT_TARGET = EndgameGate.DEFAULT_TARGET
+        const val ARM_MARGIN = EndgameGate.ARM_MARGIN
+        const val OCR_FAIL_LIMIT = 4                  // столько сбоев OCR подряд, и OCR временно отключается
+        const val OCR_DISABLED_COOLDOWN_MS = 30_000L  // пауза перед повторным включением OCR после сбоев
+        const val WAITING_FALLBACK_MS = 90_000L       // ожидание без единого признака -> считаем что матч
         const val WAITING_FALLBACK_NO_OCR_MS = 15_000L
         const val IN_MATCH_START_RECHECK_MS = 10_000L // не искать start в матче первые 10 с после тапа
         const val IN_MATCH_ARMED_INTERVAL_MS = 350L
@@ -196,6 +193,7 @@ class FastPipeline(
             val item = JSONArray()
             item.put(xFrac.toDouble())
             item.put(yFrac.toDouble())
+            item.put(System.currentTimeMillis())
             array.put(item)
             // Хранить не больше 20 точек: самые старые выпадают
             val trimmed = JSONArray()
@@ -206,10 +204,16 @@ class FastPipeline(
 
         fun isRejected(screenW: Int, screenH: Int, xFrac: Float, yFrac: Float, tag: String = "rejected"): Boolean {
             val raw = prefs.getString("${screenW}x${screenH}:$tag", null) ?: return false
+            val now = System.currentTimeMillis()
             return try {
                 val array = JSONArray(raw)
                 for (i in 0 until array.length()) {
                     val item = array.getJSONArray(i)
+                    if (item.length() >= 3) {
+                        val ts = item.optLong(2, 0L)
+                        // Ложные точки устаревают через 15 минут, предотвращая вечное залипание координат
+                        if (ts > 0L && now - ts > 15 * 60_000L) continue
+                    }
                     val dx = (xFrac - item.getDouble(0)) * screenW
                     val dy = (yFrac - item.getDouble(1)) * screenH
                     if (hypot(dx, dy) < 60.0) return true
@@ -344,17 +348,12 @@ class FastPipeline(
 
     // Чтение счёта по цифрам и «ворота конца матча»
     private val scoreReader = ScoreReader()
+    private val endgameGate = EndgameGate()
     private var scoreOcrFailures = 0
-    private var scoreOcrDisabled = false
-    private var lastReadFailed = false
-    private var matchStartMs = 0L
-    private var endgameArmed = false
-    private var lastScore: MatchScore? = null
-    private var lastKnownTarget = DEFAULT_TARGET
-    private var scoreSeenInMatch = false
-    private var armHighReads = 0
-    private var bannerMissReads = 0
-    private var gateFrame = 0
+    private var scoreOcrDisabledUntilMs = 0L
+    private val scoreOcrDisabled: Boolean
+        get() = scoreOcrDisabledUntilMs > System.currentTimeMillis()
+    private var lastScoreReadMs = 0L
     private var lastScoreLogMs = 0L
     private var lastOcrErrorLogMs = 0L
     private var lastScoreUiText = ""
@@ -386,16 +385,24 @@ class FastPipeline(
             when (newState) {
                 State.UNKNOWN -> onActionUpdate("Определение экрана...", "Поиск кнопок", null)
                 State.WAITING -> {
+                    scoreReader.resetTracker()
                     waitingSinceMs = System.currentTimeMillis()
                     waitingFrame = 0
                     onActionUpdate("Ожидание лобби", "Поиск кнопки НАЧАТЬ", null)
                 }
-                State.LOBBY -> onActionUpdate("В лобби: ожидание старта", "Поиск кнопки НАЧАТЬ", null)
+                State.LOBBY -> {
+                    scoreReader.resetTracker()
+                    scoreOcrFailures = 0
+                    scoreOcrDisabledUntilMs = 0L
+                    onActionUpdate("В лобби: ожидание старта", "Поиск кнопки НАЧАТЬ", null)
+                }
                 State.IN_MATCH -> {
                     startMatchGate()
-                    onActionUpdate("Матч идёт: пауза кликов", "Ожидание счёта ${lastKnownTarget - ARM_MARGIN}+", null)
+                    val need = endgameGate.lastKnownTarget - EndgameGate.ARM_MARGIN
+                    onActionUpdate("Матч идёт: пауза кликов", "Ожидание счёта $need+", null)
                 }
                 State.RESULT -> {
+                    scoreReader.resetTracker()
                     lastResultActionMs = System.currentTimeMillis()
                     resultMissFrames = 0
                     onActionUpdate("Результаты матча", "Нажатие ПРОДОЛЖИТЬ", null)
@@ -427,7 +434,7 @@ class FastPipeline(
             // LOBBY: опрос каждые ~350 мс
             // RESULT: опрос каждые ~300-350 мс
             val interval = when (state) {
-                State.IN_MATCH -> if (endgameArmed) IN_MATCH_ARMED_INTERVAL_MS else IN_MATCH_IDLE_INTERVAL_MS
+                State.IN_MATCH -> if (endgameGate.isArmed) IN_MATCH_ARMED_INTERVAL_MS else IN_MATCH_IDLE_INTERVAL_MS
                 State.LOBBY -> 350L
                 State.RESULT -> 350L
                 State.UNKNOWN -> 350L
@@ -815,15 +822,22 @@ class FastPipeline(
             return
         }
 
-        // 2. Пока счёт далёк от конца, кнопки «Продолжить» НЕ ищем вообще
-        //    (кнопка «присесть» в матче жёлтая/полупрозрачная и похожа на continue).
-        if (!endgameArmed) {
-            updateEndgameGate(bitmap, now)
-            if (!endgameArmed) return
+        // 2. Обновляем ворота конца матча (чтение счёта раз в ~1 с, не пропускаем даже когда armed)
+        updateEndgameGate(bitmap, now)
+
+        val mode = endgameGate.mode
+        // 3. Пока счёт далёк от конца (OFF), кнопки «Продолжить» НЕ ищем вообще
+        if (mode == EndgameMode.OFF) {
+            return
         }
 
-        // 3. Конец матча близок: ищем «Продолжить»; тап только в RESULT после подтверждения на 2 кадрах
-        if (findContinueHit(bitmap, sW, sH) != null || calibrateContinue(bitmap, sW, sH) != null) {
+        // 4. Поиск кнопки «Продолжить»:
+        // SOFT: ТОЛЬКО по уже сохранённым и seed-отпечаткам, БЕЗ калибровки по цвету (кнопка «присесть»)
+        // HARD: по отпечаткам + калибровка по цвету
+        val hit = findContinueHit(bitmap, sW, sH)
+        val calib = if (mode == EndgameMode.HARD) calibrateContinue(bitmap, sW, sH) else null
+
+        if (hit != null || calib != null) {
             transitionTo(State.RESULT)
             continueSeenFrames = 1
             return
@@ -946,23 +960,42 @@ class FastPipeline(
     //  Чтение счёта по цифрам и «ворота конца матча»
     // ---------------------------------------------------------------------------------------
 
-    /** Читает счёт; при сбое OCR возвращает null и ставит lastReadFailed (это не то же самое, что «панели нет»). */
-    private suspend fun readScoreSafe(bitmap: Bitmap): MatchScore? {
-        lastReadFailed = false
-        if (scoreOcrDisabled) {
-            lastReadFailed = true
-            return null
+    data class ReadScoreResult(val score: MatchScore?, val exceptionOccurred: Boolean)
+
+    /** Читает счёт; результат null без исключения — это нормальное чтение без панели счёта. */
+    private suspend fun readScoreSafe(bitmap: Bitmap): ReadScoreResult {
+        val now = System.currentTimeMillis()
+        if (scoreOcrDisabledUntilMs > now) {
+            return ReadScoreResult(null, exceptionOccurred = true)
         }
         return try {
             val s = scoreReader.read(bitmap)
             scoreOcrFailures = 0
-            s
+            val isDebug = settingsRepository.getLatestSettings().isDebugScreenshots
+            if (isDebug) {
+                scoreReader.maybeSaveDebugCrop(
+                    context = context,
+                    screenBitmap = bitmap,
+                    score = s,
+                    isDebugEnabled = true,
+                    now = now
+                )
+            }
+            ReadScoreResult(s, exceptionOccurred = false)
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
-            lastReadFailed = true
             scoreOcrFailures++
-            val now = System.currentTimeMillis()
+            val isDebug = settingsRepository.getLatestSettings().isDebugScreenshots
+            if (isDebug) {
+                scoreReader.maybeSaveDebugCrop(
+                    context = context,
+                    screenBitmap = bitmap,
+                    score = null,
+                    isDebugEnabled = true,
+                    now = now
+                )
+            }
             if (now - lastOcrErrorLogMs >= 5000L) {
                 lastOcrErrorLogMs = now
                 EventLogManager.log(
@@ -972,106 +1005,117 @@ class FastPipeline(
                 )
             }
             if (scoreOcrFailures >= OCR_FAIL_LIMIT) {
-                scoreOcrDisabled = true
+                scoreOcrDisabledUntilMs = now + OCR_DISABLED_COOLDOWN_MS
                 EventLogManager.log(
                     EventLogManager.TAG_AUTO_CLICKER,
-                    "SCORE: OCR отключён, работаю без защиты по счёту (как раньше)",
+                    "SCORE: OCR временно отключён на ${OCR_DISABLED_COOLDOWN_MS / 1000}с из-за ошибок ($scoreOcrFailures подряд)",
                     isError = true
                 )
             }
-            null
+            ReadScoreResult(null, exceptionOccurred = true)
         }
     }
 
     /** Если на кадре видна панель счёта: идёт матч, переходим в IN_MATCH. */
     private suspend fun enterMatchIfScoreVisible(bitmap: Bitmap, sW: Int, sH: Int): Boolean {
-        val s = readScoreSafe(bitmap) ?: return false
+        val (s, exceptionOccurred) = readScoreSafe(bitmap)
+        if (exceptionOccurred || s == null) return false
         transitionTo(State.IN_MATCH)
-        applyScore(s, System.currentTimeMillis())
+        endgameGate.onScore(s, System.currentTimeMillis())
+        logScore(s, System.currentTimeMillis())
         return true
     }
 
-    private fun applyScore(s: MatchScore, now: Long) {
-        lastScore = s
-        scoreSeenInMatch = true
-        bannerMissReads = 0
-        s.target?.let { lastKnownTarget = it }
-        val need = lastKnownTarget - ARM_MARGIN
-
+    private fun logScore(s: MatchScore, now: Long) {
+        val need = endgameGate.lastKnownTarget - EndgameGate.ARM_MARGIN
         if (now - lastScoreLogMs >= 15_000L) {
             lastScoreLogMs = now
             EventLogManager.log(
                 EventLogManager.TAG_AUTO_CLICKER,
-                "SCORE: счёт $s, порог ${need}, OCR: «${scoreReader.lastRawText.take(60)}»"
+                "SCORE: счёт $s, порог $need, OCR: «${scoreReader.lastRawText.take(60)}»"
             )
         }
-        val ui = "Счёт ${s.left ?: "?"}:${s.right ?: "?"}, ждём ${need}+"
-        if (ui != lastScoreUiText && !endgameArmed) {
-            lastScoreUiText = ui
-            onActionUpdate("Матч идёт: пауза кликов", ui, null)
-        }
-
-        if (s.max >= need) {
-            armHighReads++
-            if (armHighReads >= ARM_CONFIRM_READS) armEndgame("счёт $s, порог $need")
-        } else {
-            armHighReads = 0
-        }
-    }
-
-    private fun armEndgame(reason: String) {
-        if (endgameArmed) return
-        endgameArmed = true
-        EventLogManager.log(
-            EventLogManager.TAG_AUTO_CLICKER,
-            "SCORE: конец матча близок ($reason) -> поиск ПРОДОЛЖИТЬ включён"
-        )
-        onActionUpdate("Конец матча близок: поиск ПРОДОЛЖИТЬ", "Нажатие ПРОДОЛЖИТЬ", null)
-    }
-
-    /** Решает, пора ли искать «Продолжить». OCR раз в ~2.4 с, пока счёт далёк от цели. */
-    private suspend fun updateEndgameGate(bitmap: Bitmap, now: Long) {
-        if (endgameArmed) return
-        if (scoreOcrDisabled) {
-            armEndgame("OCR недоступен")
-            return
-        }
-        if (now - matchStartMs > MATCH_MAX_MS) {
-            armEndgame("матч идёт дольше ${MATCH_MAX_MS / 60_000} мин")
-            return
-        }
-        gateFrame++
-        if (gateFrame % 2 != 0) return
-
-        val s = readScoreSafe(bitmap)
-        if (lastReadFailed) {
-            if (scoreOcrDisabled) armEndgame("OCR недоступен")
-            return
-        }
-        if (s != null) {
-            applyScore(s, now)
-            return
-        }
-        armHighReads = 0
-        if (scoreSeenInMatch) {
-            bannerMissReads++
-            if (bannerMissReads >= BANNER_GONE_READS) {
-                armEndgame("панель счёта пропала, последний счёт $lastScore")
+        if (endgameGate.mode == EndgameMode.OFF) {
+            val ui = "Счёт ${s.left ?: "?"}:${s.right ?: "?"}, ждём ${need}+"
+            if (ui != lastScoreUiText) {
+                lastScoreUiText = ui
+                onActionUpdate("Матч идёт: пауза кликов", ui, null)
             }
-        } else if (now - matchStartMs > NO_SCORE_FALLBACK_MS) {
-            armEndgame("панель счёта не видна уже ${(now - matchStartMs) / 1000}с")
         }
+    }
+
+    private fun checkEndgameModeTransition(prevMode: EndgameMode, now: Long) {
+        val newMode = endgameGate.mode
+        if (newMode != prevMode) {
+            when (newMode) {
+                EndgameMode.HARD -> {
+                    EventLogManager.log(
+                        EventLogManager.TAG_AUTO_CLICKER,
+                        "SCORE: конец матча подтверждён [HARD] (${endgameGate.getArmReasonText(now)}) -> полный поиск ПРОДОЛЖИТЬ с калибровкой"
+                    )
+                    onActionUpdate("Конец матча: поиск ПРОДОЛЖИТЬ (HARD)", "Нажатие ПРОДОЛЖИТЬ", null)
+                }
+                EndgameMode.SOFT -> {
+                    EventLogManager.log(
+                        EventLogManager.TAG_AUTO_CLICKER,
+                        "SCORE: подозрение на конец матча [SOFT] (${endgameGate.getArmReasonText(now)}) -> поиск ПРОДОЛЖИТЬ только по отпечаткам"
+                    )
+                    onActionUpdate("Конец матча близок: поиск ПРОДОЛЖИТЬ (SOFT)", "Нажатие ПРОДОЛЖИТЬ", null)
+                }
+                EndgameMode.OFF -> {
+                    EventLogManager.log(
+                        EventLogManager.TAG_AUTO_CLICKER,
+                        "SCORE: режим конца матча отменён [OFF]: ${endgameGate.lastDisarmReason}"
+                    )
+                    val s = endgameGate.lastScore
+                    val need = endgameGate.lastKnownTarget - EndgameGate.ARM_MARGIN
+                    val ui = if (s != null) "Счёт ${s.left ?: "?"}:${s.right ?: "?"}, ждём ${need}+" else "Матч идёт: пауза кликов"
+                    onActionUpdate("Матч идёт: пауза кликов", ui, null)
+                    lastScoreUiText = ui
+                }
+            }
+        }
+    }
+
+    /** Решает, пора ли искать «Продолжить». Чтение счёта раз в ~1 с (не пропускаем даже когда armed). */
+    private suspend fun updateEndgameGate(bitmap: Bitmap, now: Long) {
+        val prevMode = endgameGate.mode
+
+        // Опрос OCR раз в ~1 с
+        if (now - lastScoreReadMs < 900L) {
+            endgameGate.onTimeTick(now)
+            checkEndgameModeTransition(prevMode, now)
+            return
+        }
+        lastScoreReadMs = now
+
+        if (scoreOcrDisabled) {
+            endgameGate.onOcrUnavailable(now)
+        } else {
+            val (s, exceptionOccurred) = readScoreSafe(bitmap)
+            if (exceptionOccurred) {
+                if (scoreOcrDisabled) {
+                    endgameGate.onOcrUnavailable(now)
+                }
+            } else if (s != null) {
+                s.timerSeconds?.let { endgameGate.onTimer(it, now) }
+                endgameGate.onScore(s, now)
+                logScore(s, now)
+            } else {
+                endgameGate.onEmptyRead(now)
+            }
+        }
+
+        checkEndgameModeTransition(prevMode, now)
     }
 
     private fun startMatchGate() {
-        matchStartMs = System.currentTimeMillis()
-        endgameArmed = false
-        lastScore = null
-        scoreSeenInMatch = false
-        armHighReads = 0
-        bannerMissReads = 0
-        gateFrame = 0
-        inMatchFrame = 0
+        val now = System.currentTimeMillis()
+        endgameGate.startMatch(now)
+        scoreReader.resetTracker()
+        scoreOcrFailures = 0
+        scoreOcrDisabledUntilMs = 0L
+        lastScoreReadMs = 0L
         lastScoreUiText = ""
     }
 
@@ -1232,10 +1276,12 @@ class FastPipeline(
         startPending = false
         startTapCount = 0
         startGoneFrames = 0
+        provisionalStart = null
         continuePending = false
         continueTapCount = 0
         continueGoneFrames = 0
         continueSeenFrames = 0
+        continueBlockedUntilMs = 0L
         pendingCalib = null
         pendingCalibFrames = 0
         startTapBox = null
