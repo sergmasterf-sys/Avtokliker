@@ -360,6 +360,7 @@ class FastPipeline(
         tap = { x, y -> performSafeTap(x, y) },
         onAction = { current, next -> onActionUpdate(current, next, null) }
     )
+    private var adWasEnabled = true
     private var scoreOcrFailures = 0
     private var scoreOcrDisabledUntilMs = 0L
     private val scoreOcrDisabled: Boolean
@@ -393,7 +394,9 @@ class FastPipeline(
             EventLogManager.log(EventLogManager.TAG_AUTO_CLICKER, "FAST: $state -> $newState")
             state = newState
             resetTapTracking()
-            adCloser.reset()
+            if (newState == State.IN_MATCH || newState == State.RESULT) {
+                adCloser.finish("начался матч") // реклама бывает только при входе в игру
+            }
             when (newState) {
                 State.UNKNOWN -> onActionUpdate("Определение экрана...", "Поиск кнопок", null)
                 State.WAITING -> {
@@ -550,9 +553,20 @@ class FastPipeline(
     ) {
         // Реклама поверх лобби (в т.ч. несколько подряд): сначала закрываем её крестиком.
         // В матче и на экране результатов не ищем, чтобы не принять игровой значок за крестик.
-        if ((state == State.UNKNOWN || state == State.WAITING || state == State.LOBBY) &&
+        val inLobbyArea = state == State.UNKNOWN || state == State.WAITING || state == State.LOBBY
+        val adEnabled = settingsRepository.getLatestSettings().isAdCloserEnabled
+        if (adEnabled != adWasEnabled) {
+            adWasEnabled = adEnabled
+            if (!adEnabled) {
+                adCloser.finish("отключено переключателем в плавающем окне")
+            } else if (inLobbyArea) {
+                adCloser.restartSession() // включили снова: проверяем наличие рекламы заново
+            }
+        }
+        if (adEnabled && adCloser.isActive && inLobbyArea &&
             System.currentTimeMillis() - lastStartTapMs > AD_SKIP_AFTER_START_TAP_MS
         ) {
+            if (state == State.LOBBY) adCloser.onLobbyVisible()
             if (adCloser.step(bitmap, sW, sH)) return
         }
 
@@ -1287,6 +1301,7 @@ class FastPipeline(
         onActionUpdate("Нажатие: НАЧАТЬ", "Проверка: кнопка должна смениться на «Подбор»", "НАЖАТИЕ: start (${x.toInt()}, ${y.toInt()})")
         val ok = performSafeTap(x, y)
         lastStartTapMs = System.currentTimeMillis()
+        if (ok) adCloser.finish("нажата НАЧАТЬ")
         if (!ok) {
             // Система отменила жест: тап не состоялся, повторяем скоро и не считаем попыткой
             startTapCount = (startTapCount - 1).coerceAtLeast(0)
@@ -1490,7 +1505,7 @@ class FastPipeline(
             if (edge) {
                 px = (boxLeft + sample.relX * scale).toInt().coerceIn(1, sW - 2)
                 val dy = sample.relY * scale
-                py = (if (dy >= 0f) boxTop + dy else boxBottom + dy).toInt().coerceIn(1, sH - 2)
+                py = (if (dy >= 0f) boxTop + shift(dy) else boxBottom + dy).toInt().coerceIn(1, sH - 2)
             } else {
                 px = (boxLeft + sample.relX * boxW).toInt().coerceIn(1, sW - 2)
                 py = (boxTop + sample.relY * boxH).toInt().coerceIn(1, sH - 2)
@@ -1522,6 +1537,8 @@ class FastPipeline(
         }
         return matched
     }
+
+    private fun shift(dy: Float): Float = dy
 
     /**
      * Поиск кнопки через ColorBlobFinder на ROI (step=4 для скорости).

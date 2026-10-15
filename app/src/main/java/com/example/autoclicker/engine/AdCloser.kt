@@ -33,10 +33,10 @@ data class AdCrossCandidate(
  */
 object AdCrossDetector {
     // Область поиска: правая верхняя часть (рекламный крестик почти всегда там)
-    const val ROI_X0 = 0.55f
+    const val ROI_X0 = 0.65f
     const val ROI_X1 = 1.0f
     const val ROI_Y0 = 0.0f
-    const val ROI_Y1 = 0.42f
+    const val ROI_Y1 = 0.30f
 
     /** Размеры окна крестика в единицах высоты 800. Расширено для разных экранов и реклам. */
     val SIZES_U = intArrayOf(10, 12, 14, 16, 20, 24, 30, 36, 44)
@@ -207,16 +207,18 @@ object AdCrossDetector {
 }
 
 /**
- * Закрывает рекламные окна («обновление версии» и т.п.) в лобби PUBG:
- * ищет крестик в правом верхнем углу и нажимает на него, пока крестики есть
- * (окон может быть 2 и больше). Когда крестиков не осталось, [step] возвращает false,
- * и обычная логика (кнопка «НАЧАТЬ») продолжается.
+ * Закрывает рекламные окна при входе в игру (крестик «×» в правом верхнем углу).
  *
- * Защита от ложных нажатий:
- *  - крестик должен быть виден на [CONFIRM_FRAMES] кадрах подряд в одной точке;
- *  - между нажатиями минимум [TAP_GAP_MS];
- *  - если после [MAX_SAME_SPOT_TAPS] нажатий на одну точку крестик не исчез, точка в чёрном списке на [BLACKLIST_MS];
- *  - не больше [MAX_SERIES_TAPS] нажатий подряд, потом пауза [SERIES_PAUSE_MS].
+ * Работает «сеансом», а не постоянно:
+ *  - сеанс начинается при включении ползунка (или при включении переключателя «Закрывать рекламу»);
+ *  - пока идёт сеанс, ищем крестики в лобби: каждый найденный запоминаем (координаты),
+ *    нажимаем только после подтверждения на [CONFIRM_FRAMES] кадрах подряд, не больше
+ *    [MAX_SPOT_TAPS] раз на одно место (пока крестик не исчез между нажатиями);
+ *  - после каждого нажатия ждём и снова проверяем, не появилась ли следующая реклама;
+ *  - если крестиков нет [QUIET_MS] после появления лобби, сеанс завершается и больше
+ *    ничего не ищется (после матча и в матче крестик не ищем вообще);
+ *  - сеанс также завершается: при начале матча, после нажатия «НАЧАТЬ», по лимиту нажатий
+ *    [MAX_TOTAL_TAPS] или времени [SESSION_MAX_MS].
  *
  * @param tap    выполняет нажатие (в FastPipeline это performSafeTap)
  * @param onAction  обновляет строки статуса в плавающем окне (текущее действие, следующее)
@@ -227,124 +229,167 @@ class AdCloser(
     private val clock: () -> Long = { System.currentTimeMillis() }
 ) {
     companion object {
-        const val CONFIRM_FRAMES = 2
+        const val CONFIRM_FRAMES = 3            // крестик должен стоять на месте столько кадров подряд
         const val TAP_GAP_MS = 700L
-        const val SETTLE_AFTER_TAP_MS = 1400L   // после нажатия ждём анимацию закрытия / появление следующей рекламы
-        const val MAX_SAME_SPOT_TAPS = 3
-        const val BLACKLIST_MS = 45_000L
-        const val MAX_SERIES_TAPS = 12
-        const val SERIES_PAUSE_MS = 25_000L
+        const val SETTLE_AFTER_TAP_MS = 1400L   // после нажатия ждём закрытия / появления следующей рекламы
+        const val QUIET_MS = 1800L              // столько тишины (нет крестиков) после лобби, и сеанс закончен
+        const val MAX_SPOT_TAPS = 2             // нажатий на одно место, пока крестик не исчезал
+        const val MAX_TOTAL_TAPS = 8
+        const val SESSION_MAX_MS = 60_000L
+        private const val GONE_FRAMES_FOR_NEW_AD = 2
         private const val SPOT_TOL_FRAC_OF_H = 0.05f
     }
 
-    private class Spot(val x: Float, val y: Float, val untilMs: Long)
+    /** Запомненное место крестика. */
+    private class Spot(val x: Float, val y: Float) {
+        var taps = 0
+        var blocked = false
+    }
 
     private var pixelBuf = IntArray(0)
 
+    private var active = true
+    private val spots = ArrayList<Spot>()
     private var pending: AdCrossCandidate? = null
     private var pendingFrames = 0
+    private var sessionStartMs = 0L
+    private var lobbySeenMs = 0L
+    private var lastCrossSeenMs = 0L
     private var lastTapMs = 0L
-    private var lastTapX = -1f
-    private var lastTapY = -1f
-    private var sameSpotTaps = 0
-    private var seriesTaps = 0
-    private var pausedUntilMs = 0L
-    private val blacklist = ArrayList<Spot>()
+    private var goneFramesSinceTap = 0
+    private var totalTaps = 0
     private var lastErrorLogMs = 0L
 
-    fun reset() {
+    /** true, пока сеанс поиска рекламы идёт. */
+    val isActive: Boolean
+        get() = active
+
+    /** Начать новый сеанс (ползунок включили / включили «Закрывать рекламу»). */
+    fun restartSession() {
+        active = true
+        spots.clear()
         pending = null
         pendingFrames = 0
-        sameSpotTaps = 0
-        seriesTaps = 0
-        lastTapX = -1f
-        lastTapY = -1f
+        sessionStartMs = 0L
+        lobbySeenMs = 0L
+        lastCrossSeenMs = 0L
+        lastTapMs = 0L
+        goneFramesSinceTap = 0
+        totalTaps = 0
+        EventLogManager.log(EventLogManager.TAG_AUTO_CLICKER, "AD: начат поиск рекламы (крестиков)")
     }
 
+    /** Совместимость с кодом конвейера */
+    fun reset() = restartSession()
+
+    /** Завершить сеанс: до следующего [restartSession] крестики не ищутся и не нажимаются. */
+    fun finish(reason: String) {
+        if (!active) return
+        active = false
+        pending = null
+        pendingFrames = 0
+        EventLogManager.log(
+            EventLogManager.TAG_AUTO_CLICKER,
+            "AD: поиск рекламы завершён ($reason), нажато крестиков: $totalTaps, запомнено мест: ${spots.size}"
+        )
+    }
+
+    /** Вызывать, когда на экране видно лобби: с этого момента начинает идти «время тишины». */
+    fun onLobbyVisible() {
+        if (active && lobbySeenMs == 0L) {
+            lobbySeenMs = clock()
+            if (sessionStartMs == 0L) sessionStartMs = lobbySeenMs
+        }
+    }
+
+    private fun spotAt(x: Float, y: Float, tol: Float): Spot? =
+        spots.firstOrNull { hypot((it.x - x).toDouble(), (it.y - y).toDouble()) <= tol }
+
     /**
-     * Обрабатывает один кадр. true — кадр «занят рекламой» (нажали крестик, ждём подтверждения
-     * или закрытия окна): остальную логику на этом кадре пропустить. false — рекламы нет.
+     * Обрабатывает один кадр. true — кадр «занят рекламой» (подтверждаем крестик, нажали,
+     * ждём закрытия или ждём возможную следующую рекламу): остальную логику пропустить.
+     * false — можно выполнять обычную логику.
      */
     suspend fun step(bitmap: Bitmap, screenW: Int, screenH: Int): Boolean {
+        if (!active) return false
         val now = clock()
-        if (now < pausedUntilMs) return false
+        if (sessionStartMs > 0L && now - sessionStartMs > SESSION_MAX_MS) {
+            finish("лимит времени")
+            return false
+        }
 
         var cand = findCandidate(bitmap, screenW, screenH)
         val tol = screenH * SPOT_TOL_FRAC_OF_H
-        blacklist.removeAll { it.untilMs <= now }
-        if (cand != null && blacklist.any { hypot((it.x - cand!!.x).toDouble(), (it.y - cand!!.y).toDouble()) <= tol }) {
-            cand = null
-        }
+        if (cand != null && spotAt(cand.x, cand.y, tol)?.blocked == true) cand = null
 
         if (cand == null) {
             pending = null
             pendingFrames = 0
-            if (seriesTaps > 0) {
-                if (now - lastTapMs < SETTLE_AFTER_TAP_MS) return true // ждём закрытия / следующее окно
-                EventLogManager.log(
-                    EventLogManager.TAG_AUTO_CLICKER,
-                    "AD: реклама закрыта (нажато крестиков: $seriesTaps), продолжаю обычную логику"
-                )
-                seriesTaps = 0
-                sameSpotTaps = 0
-                lastTapX = -1f
-                lastTapY = -1f
+            if (lastTapMs > 0L) goneFramesSinceTap++
+            // Только что нажали: ждём анимацию закрытия и возможную следующую рекламу
+            if (lastTapMs > 0L && now - lastTapMs < SETTLE_AFTER_TAP_MS) return true
+            val anchor = maxOf(lobbySeenMs, lastCrossSeenMs, lastTapMs)
+            if (anchor == 0L) return false // игра ещё грузится, лобби не видно
+            if (now - anchor >= QUIET_MS) {
+                finish(if (totalTaps > 0) "реклама закрыта" else "рекламы нет")
+                return false
             }
-            return false
+            return true // короткое окно ожидания: вдруг реклама ещё появится
         }
 
+        lastCrossSeenMs = now
+        if (sessionStartMs == 0L) sessionStartMs = now
         val prev = pending
-        if (prev != null && hypot((prev.x - cand.x).toDouble(), (prev.y - cand.y).toDouble()) <= tol) {
-            pendingFrames++
+        pendingFrames = if (prev != null && hypot((prev.x - cand.x).toDouble(), (prev.y - cand.y).toDouble()) <= tol) {
+            pendingFrames + 1
         } else {
-            pendingFrames = 1
+            1
         }
         pending = cand
         if (pendingFrames < CONFIRM_FRAMES) return true
         if (now - lastTapMs < TAP_GAP_MS) return true
 
-        val repeat = lastTapX >= 0f &&
-            hypot((lastTapX - cand.x).toDouble(), (lastTapY - cand.y).toDouble()) <= tol
-        val tapsOnSpot = if (repeat) sameSpotTaps else 0
-        if (tapsOnSpot >= MAX_SAME_SPOT_TAPS) {
-            blacklist.add(Spot(cand.x, cand.y, now + BLACKLIST_MS))
+        var spot = spotAt(cand.x, cand.y, tol)
+        if (spot == null) {
+            spot = Spot(cand.x, cand.y)
+            spots.add(spot)
             EventLogManager.log(
                 EventLogManager.TAG_AUTO_CLICKER,
-                "AD: крестик ${cand.x.toInt()},${cand.y.toInt()} не исчезает после $tapsOnSpot нажатий — считаю ложным, игнорирую ${BLACKLIST_MS / 1000}с",
+                "AD: запомнил крестик ${cand.x.toInt()},${cand.y.toInt()} размер ${cand.sizePx.toInt()}px " +
+                    "оценка ${"%.2f".format(cand.score)} контраст ${cand.contrast}"
+            )
+        } else if (goneFramesSinceTap >= GONE_FRAMES_FOR_NEW_AD) {
+            // Между нажатиями крестик пропадал: это новая реклама на том же месте
+            spot.taps = 0
+        }
+
+        if (spot.taps >= MAX_SPOT_TAPS) {
+            spot.blocked = true
+            EventLogManager.log(
+                EventLogManager.TAG_AUTO_CLICKER,
+                "AD: крестик ${spot.x.toInt()},${spot.y.toInt()} не исчезает после ${spot.taps} нажатий — считаю ложным, больше не трогаю",
                 isError = true
             )
             pending = null
             pendingFrames = 0
-            sameSpotTaps = 0
-            lastTapX = -1f
-            lastTapY = -1f
             return false
         }
-        if (seriesTaps >= MAX_SERIES_TAPS) {
-            pausedUntilMs = now + SERIES_PAUSE_MS
-            EventLogManager.log(
-                EventLogManager.TAG_AUTO_CLICKER,
-                "AD: $seriesTaps нажатий подряд, реклама не заканчивается — пауза ${SERIES_PAUSE_MS / 1000}с",
-                isError = true
-            )
-            seriesTaps = 0
-            reset()
+        if (totalTaps >= MAX_TOTAL_TAPS) {
+            finish("лимит нажатий")
             return false
         }
 
         onAction("Закрытие рекламы", "Нажатие на крестик ${cand.x.toInt()}, ${cand.y.toInt()}")
         EventLogManager.log(
             EventLogManager.TAG_AUTO_CLICKER,
-            "AD: найден крестик ${cand.x.toInt()},${cand.y.toInt()} размер ${cand.sizePx.toInt()}px " +
-                "оценка ${"%.2f".format(cand.score)} контраст ${cand.contrast} -> тап (подряд: ${seriesTaps + 1}, на этой точке: ${tapsOnSpot + 1})"
+            "AD: тап по крестику ${cand.x.toInt()},${cand.y.toInt()} (всего: ${totalTaps + 1}, на этом месте: ${spot.taps + 1})"
         )
         val ok = tap(cand.x, cand.y)
         lastTapMs = clock()
+        goneFramesSinceTap = 0
         if (ok) {
-            seriesTaps++
-            sameSpotTaps = tapsOnSpot + 1
-            lastTapX = cand.x
-            lastTapY = cand.y
+            spot.taps++
+            totalTaps++
         } else {
             EventLogManager.log(EventLogManager.TAG_AUTO_CLICKER, "AD: тап по крестику не выполнен системой, повтор", isError = true)
         }

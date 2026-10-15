@@ -6,6 +6,7 @@ import android.app.AlertDialog
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
@@ -69,6 +70,7 @@ class FloatingOverlayService : Service() {
     private lateinit var lastTapText: TextView
     private lateinit var clockText: TextView
     private lateinit var switchSlider: com.example.autoclicker.ui.views.NeonSwitchSliderView
+    private lateinit var adSwitch: android.widget.Switch
 
     // Свёрнутая кнопка
     private lateinit var floatingBadgeButton: com.example.autoclicker.ui.views.NeonPowerBadgeView
@@ -454,6 +456,42 @@ class FloatingOverlayService : Service() {
             }
         }
         expandedLayout.addView(switchSlider)
+
+        // 4. Переключатель «Закрывать рекламу»: выкл -> крестик не ищется и не нажимается
+        val adRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val adLabel = TextView(this).apply {
+            text = "Закрывать рекламу"
+            setTextColor(Color.parseColor("#B0BEC5"))
+            textSize = 11f
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        adSwitch = android.widget.Switch(this).apply {
+            isChecked = settingsRepo.getLatestSettings().isAdCloserEnabled
+            val states = arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf())
+            thumbTintList = ColorStateList(
+                states,
+                intArrayOf(Color.parseColor("#39FF14"), Color.parseColor("#FF2A3D"))
+            )
+            trackTintList = ColorStateList(
+                states,
+                intArrayOf(Color.parseColor("#6639FF14"), Color.parseColor("#66FF2A3D"))
+            )
+            setOnCheckedChangeListener { _, checked ->
+                if (checked != settingsRepo.getLatestSettings().isAdCloserEnabled) {
+                    settingsRepo.updateAdCloserEnabled(checked)
+                    EventLogManager.log(
+                        EventLogManager.TAG_OVERLAY,
+                        if (checked) "Закрытие рекламы: ВКЛ" else "Закрытие рекламы: ВЫКЛ"
+                    )
+                }
+            }
+        }
+        adRow.addView(adLabel)
+        adRow.addView(adSwitch)
+        expandedLayout.addView(adRow)
     }
 
     private fun showCloseAutoClickerDialog() {
@@ -565,6 +603,14 @@ class FloatingOverlayService : Service() {
     }
 
     private fun observeControllerState() {
+        serviceScope.launch {
+            settingsRepo.settings.collect { st ->
+                if (::adSwitch.isInitialized && adSwitch.isChecked != st.isAdCloserEnabled) {
+                    adSwitch.isChecked = st.isAdCloserEnabled
+                }
+            }
+        }
+
         serviceScope.launch {
             smartEngine.status.collect { status ->
                 val mode = if (status != CycleStatus.STOPPED) "SMART" else "NORMAL"
