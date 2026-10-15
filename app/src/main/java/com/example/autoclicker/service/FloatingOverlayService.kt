@@ -702,6 +702,11 @@ class FloatingOverlayService : Service() {
             AutoClickForegroundService.start(applicationContext)
         } catch (_: Exception) {
         }
+        rootContainer?.post {
+            rootContainer?.visibility = View.VISIBLE
+            setMode(minimized = true)
+            clampRootToScreen()
+        }
         return START_STICKY
     }
 
