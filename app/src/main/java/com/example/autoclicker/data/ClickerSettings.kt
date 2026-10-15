@@ -8,13 +8,11 @@ package com.example.autoclicker.data
  * @param isSmartMode Включён ли Умный режим.
  * @param isDebugScreenshots Сохранять ли отладочные снимки экрана.
  * @param neonBrightness Яркость неона 0..100.
- * @param isAdCloserEnabled Искать и закрывать рекламу (крестик) при входе в игру.
  */
 data class ClickerSettings(
     val overlayX: Int = 100,
     val overlayY: Int = 200,
     val isSmartMode: Boolean = true,
     val isDebugScreenshots: Boolean = false,
-    val neonBrightness: Int = 85,
-    val isAdCloserEnabled: Boolean = true
+    val neonBrightness: Int = 85
 )

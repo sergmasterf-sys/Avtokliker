@@ -26,7 +26,6 @@ class SettingsRepository(val context: Context) {
         val isSmartMode = prefs.getBoolean(KEY_SMART_MODE, true)
         val isDebugScreenshots = prefs.getBoolean(KEY_DEBUG_SCREENSHOTS, false)
         val neonBrightness = prefs.getInt(KEY_NEON_BRIGHTNESS, 85)
-        val isAdCloserEnabled = prefs.getBoolean(KEY_AD_CLOSER, true)
         com.example.autoclicker.ui.theme.NeonTheme.brightness = neonBrightness / 100f
 
         return ClickerSettings(
@@ -34,8 +33,7 @@ class SettingsRepository(val context: Context) {
             overlayY = overlayY,
             isSmartMode = isSmartMode,
             isDebugScreenshots = isDebugScreenshots,
-            neonBrightness = neonBrightness,
-            isAdCloserEnabled = isAdCloserEnabled
+            neonBrightness = neonBrightness
         )
     }
 
@@ -50,13 +48,6 @@ class SettingsRepository(val context: Context) {
     fun updateSmartMode(enabled: Boolean) {
         prefs.edit()
             .putBoolean(KEY_SMART_MODE, enabled)
-            .apply()
-        _settings.value = loadSettings()
-    }
-
-    fun updateAdCloserEnabled(enabled: Boolean) {
-        prefs.edit()
-            .putBoolean(KEY_AD_CLOSER, enabled)
             .apply()
         _settings.value = loadSettings()
     }
@@ -122,7 +113,6 @@ class SettingsRepository(val context: Context) {
         private const val KEY_OVERLAY_Y = "overlay_y"
         private const val KEY_SMART_MODE = "is_smart_mode"
         private const val KEY_DEBUG_SCREENSHOTS = "is_debug_screenshots"
-        private const val KEY_AD_CLOSER = "ad_closer_enabled"
         private const val KEY_RUN_ACTIVE = "run_active"
         private const val KEY_PAUSED = "run_paused"
         private const val KEY_OVERLAY_WANTED = "overlay_wanted"

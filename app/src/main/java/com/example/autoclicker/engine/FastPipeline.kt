@@ -66,7 +66,6 @@ class FastPipeline(
         const val SCORE_CONFLICT_INTERVAL_MS = 350L   // счёт расходится с хранимым: читаем чаще, чтобы быстро исправить
         const val SCORE_READ_PERIOD_MS = 900L
         const val SCORE_CONFLICT_READ_PERIOD_MS = 300L
-        const val AD_SKIP_AFTER_START_TAP_MS = 4000L  // сразу после тапа «Начать» рекламу не ищем
 
         // Проверка, что тап по start реально запустил подбор
         const val START_GONE_YELLOW_MAX = 0.12f   // на месте кнопки жёлтого должно стать меньше 12%
@@ -355,12 +354,6 @@ class FastPipeline(
     private val endgameGate = EndgameGate()
     private var lastResyncLogged = 0
 
-    // Закрытие рекламы (крестик в правом верхнем углу) перед нажатием «Начать»
-    private val adCloser = AdCloser(
-        tap = { x, y -> performSafeTap(x, y) },
-        onAction = { current, next -> onActionUpdate(current, next, null) }
-    )
-    private var adWasEnabled = true
     private var scoreOcrFailures = 0
     private var scoreOcrDisabledUntilMs = 0L
     private val scoreOcrDisabled: Boolean
@@ -394,9 +387,6 @@ class FastPipeline(
             EventLogManager.log(EventLogManager.TAG_AUTO_CLICKER, "FAST: $state -> $newState")
             state = newState
             resetTapTracking()
-            if (newState == State.IN_MATCH || newState == State.RESULT) {
-                adCloser.finish("начался матч") // реклама бывает только при входе в игру
-            }
             when (newState) {
                 State.UNKNOWN -> onActionUpdate("Определение экрана...", "Поиск кнопок", null)
                 State.WAITING -> {
@@ -551,25 +541,6 @@ class FastPipeline(
         config: EffectiveConfig,
         shotStart: Long
     ) {
-        // Реклама поверх лобби (в т.ч. несколько подряд): сначала закрываем её крестиком.
-        // В матче и на экране результатов не ищем, чтобы не принять игровой значок за крестик.
-        val inLobbyArea = state == State.UNKNOWN || state == State.WAITING || state == State.LOBBY
-        val adEnabled = settingsRepository.getLatestSettings().isAdCloserEnabled
-        if (adEnabled != adWasEnabled) {
-            adWasEnabled = adEnabled
-            if (!adEnabled) {
-                adCloser.finish("отключено переключателем в плавающем окне")
-            } else if (inLobbyArea) {
-                adCloser.restartSession() // включили снова: проверяем наличие рекламы заново
-            }
-        }
-        if (adEnabled && adCloser.isActive && inLobbyArea &&
-            System.currentTimeMillis() - lastStartTapMs > AD_SKIP_AFTER_START_TAP_MS
-        ) {
-            if (state == State.LOBBY) adCloser.onLobbyVisible()
-            if (adCloser.step(bitmap, sW, sH)) return
-        }
-
         when (state) {
             State.UNKNOWN -> handleUnknownState(bitmap, sW, sH, config, shotStart)
             State.WAITING -> handleWaitingState(bitmap, sW, sH, config, shotStart)
@@ -1301,7 +1272,6 @@ class FastPipeline(
         onActionUpdate("Нажатие: НАЧАТЬ", "Проверка: кнопка должна смениться на «Подбор»", "НАЖАТИЕ: start (${x.toInt()}, ${y.toInt()})")
         val ok = performSafeTap(x, y)
         lastStartTapMs = System.currentTimeMillis()
-        if (ok) adCloser.finish("нажата НАЧАТЬ")
         if (!ok) {
             // Система отменила жест: тап не состоялся, повторяем скоро и не считаем попыткой
             startTapCount = (startTapCount - 1).coerceAtLeast(0)
